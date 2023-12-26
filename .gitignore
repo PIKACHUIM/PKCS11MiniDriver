@@ -1,0 +1,6 @@
+bin/*
+bin/
+build/windows/x64/*
+build/windows/x64/
+build/windows/pkcs11-mock/x64/Debug/*
+build/windows/pkcs11-mock/x64/Debug/

@@ -1,0 +1,5 @@
+﻿  pkcs11-mock.cpp
+D:\MyProject\PKCS11-Mock\src\pkcs11-mock.cpp(801,69): warning C4267: “=”: 从“size_t”转换到“CK_ULONG”，可能丢失数据
+D:\MyProject\PKCS11-Mock\src\pkcs11-mock.cpp(819,70): warning C4267: “=”: 从“size_t”转换到“CK_ULONG”，可能丢失数据
+    正在创建库 D:\MyProject\PKCS11-Mock\build\windows\x64\Debug\pkcs11-mock-x64.lib 和对象 D:\MyProject\PKCS11-Mock\build\windows\x64\Debug\pkcs11-mock-x64.exp
+  pkcs11-mock.vcxproj -> D:\MyProject\PKCS11-Mock\build\windows\x64\Debug\pkcs11-mock-x64.dll
