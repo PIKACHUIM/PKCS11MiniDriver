@@ -1,0 +1,166 @@
+// Package ipc 实现与 pkcs11-mock C 库的 IPC 通信协议。
+// 通信方式：Windows 使用 Named Pipe，macOS/Linux 使用 Unix Domain Socket。
+// 协议格式：Magic(4B) + Cmd(4B) + Len(4B) + Payload(JSON)
+package ipc
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+)
+
+// 协议魔数，用于帧同步校验。
+const Magic uint32 = 0x504B3131 // "PK11"
+
+// 帧头大小：Magic(4) + Cmd(4) + Len(4) = 12 字节。
+const HeaderSize = 12
+
+// 最大 Payload 大小：4MB。
+const MaxPayloadSize = 4 * 1024 * 1024
+
+// CmdCode 是 PKCS#11 命令码。
+type CmdCode uint32
+
+// PKCS#11 命令码定义，对应 C 层的函数调用。
+const (
+	CmdGetInfo          CmdCode = 0x0001
+	CmdGetSlotList      CmdCode = 0x0002
+	CmdGetSlotInfo      CmdCode = 0x0003
+	CmdGetTokenInfo     CmdCode = 0x0004
+	CmdGetMechanismList CmdCode = 0x0005
+	CmdGetMechanismInfo CmdCode = 0x0006
+	CmdOpenSession      CmdCode = 0x0007
+	CmdCloseSession     CmdCode = 0x0008
+	CmdCloseAllSessions CmdCode = 0x0009
+	CmdLogin            CmdCode = 0x000A
+	CmdLogout           CmdCode = 0x000B
+	CmdFindObjectsInit  CmdCode = 0x000C
+	CmdFindObjects      CmdCode = 0x000D
+	CmdFindObjectsFinal CmdCode = 0x000E
+	CmdGetAttributeValue CmdCode = 0x000F
+	CmdSetAttributeValue CmdCode = 0x0010
+	CmdCreateObject     CmdCode = 0x0011
+	CmdDestroyObject    CmdCode = 0x0012
+	CmdGetObjectSize    CmdCode = 0x0013
+	CmdSignInit         CmdCode = 0x0014
+	CmdSign             CmdCode = 0x0015
+	CmdSignUpdate       CmdCode = 0x0016
+	CmdSignFinal        CmdCode = 0x0017
+	CmdVerifyInit       CmdCode = 0x0018
+	CmdVerify           CmdCode = 0x0019
+	CmdDecryptInit      CmdCode = 0x001A
+	CmdDecrypt          CmdCode = 0x001B
+	CmdEncryptInit      CmdCode = 0x001C
+	CmdEncrypt          CmdCode = 0x001D
+	CmdGenerateKeyPair  CmdCode = 0x001E
+	CmdGenerateRandom   CmdCode = 0x001F
+	CmdDigestInit       CmdCode = 0x0020
+	CmdDigest           CmdCode = 0x0021
+)
+
+// Frame 是 IPC 通信帧。
+type Frame struct {
+	Cmd     CmdCode
+	Payload []byte
+}
+
+// Request 是 IPC 请求的通用结构（JSON Payload）。
+type Request struct {
+	SessionID uint32          `json:"session_id,omitempty"`
+	SlotID    uint32          `json:"slot_id,omitempty"`
+	Data      json.RawMessage `json:"data,omitempty"`
+}
+
+// Response 是 IPC 响应的通用结构（JSON Payload）。
+type Response struct {
+	RV   uint32          `json:"rv"`            // CK_RV 返回码
+	Data json.RawMessage `json:"data,omitempty"` // 各命令特定数据
+}
+
+// WriteFrame 向 writer 写入一个 IPC 帧。
+func WriteFrame(w io.Writer, cmd CmdCode, payload []byte) error {
+	if len(payload) > MaxPayloadSize {
+		return fmt.Errorf("payload 超过最大限制 %d 字节", MaxPayloadSize)
+	}
+
+	header := make([]byte, HeaderSize)
+	binary.BigEndian.PutUint32(header[0:4], Magic)
+	binary.BigEndian.PutUint32(header[4:8], uint32(cmd))
+	binary.BigEndian.PutUint32(header[8:12], uint32(len(payload)))
+
+	if _, err := w.Write(header); err != nil {
+		return fmt.Errorf("写入帧头失败: %w", err)
+	}
+	if len(payload) > 0 {
+		if _, err := w.Write(payload); err != nil {
+			return fmt.Errorf("写入 payload 失败: %w", err)
+		}
+	}
+	return nil
+}
+
+// ReadFrame 从 reader 读取一个 IPC 帧。
+func ReadFrame(r io.Reader) (*Frame, error) {
+	header := make([]byte, HeaderSize)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return nil, fmt.Errorf("读取帧头失败: %w", err)
+	}
+
+	magic := binary.BigEndian.Uint32(header[0:4])
+	if magic != Magic {
+		return nil, fmt.Errorf("魔数不匹配: 期望 0x%08X，实际 0x%08X", Magic, magic)
+	}
+
+	cmd := CmdCode(binary.BigEndian.Uint32(header[4:8]))
+	payloadLen := binary.BigEndian.Uint32(header[8:12])
+
+	if payloadLen > MaxPayloadSize {
+		return nil, fmt.Errorf("payload 长度 %d 超过最大限制", payloadLen)
+	}
+
+	payload := make([]byte, payloadLen)
+	if payloadLen > 0 {
+		if _, err := io.ReadFull(r, payload); err != nil {
+			return nil, fmt.Errorf("读取 payload 失败: %w", err)
+		}
+	}
+
+	return &Frame{Cmd: cmd, Payload: payload}, nil
+}
+
+// WriteResponse 向 writer 写入一个响应帧。
+func WriteResponse(w io.Writer, cmd CmdCode, rv uint32, data interface{}) error {
+	resp := Response{RV: rv}
+	if data != nil {
+		b, err := json.Marshal(data)
+		if err != nil {
+			return fmt.Errorf("序列化响应数据失败: %w", err)
+		}
+		resp.Data = b
+	}
+
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("序列化响应失败: %w", err)
+	}
+
+	return WriteFrame(w, cmd, payload)
+}
+
+// ParseRequest 解析请求帧的 Payload。
+func ParseRequest(payload []byte, out interface{}) error {
+	if err := json.Unmarshal(payload, out); err != nil {
+		return fmt.Errorf("解析请求失败: %w", err)
+	}
+	return nil
+}
+
+// ParseResponse 解析响应帧的 Payload，返回 Response 结构。
+func ParseResponse(payload []byte) (*Response, error) {
+	var resp Response
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+	return &resp, nil
+}
