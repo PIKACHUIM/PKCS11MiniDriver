@@ -2,11 +2,14 @@ name: Release Beta
 
 on:
   push:
+    branches:
+      - main
+      - master
     tags:
-      - "v*-beta*"   # 匹配 v0.1.0-beta.1、v1.0.0-beta 等
-      - "v*-rc*"     # 匹配 v1.0.0-rc.1 等
+      - "v*-beta*"   # 手动打 tag 也触发
+      - "v*-rc*"
 
-# 同一 tag 只保留最新一次运行
+# 同一分支只保留最新一次运行
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
@@ -17,11 +20,44 @@ env:
 
 jobs:
   # ================================================================
+  # Job 0: 生成版本号（push 分支时自动生成，push tag 时直接使用 tag）
+  # ================================================================
+  version:
+    name: Generate version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.gen.outputs.version }}
+      tag_name: ${{ steps.gen.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate version
+        id: gen
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # 手动打 tag 触发：直接使用 tag 名
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            # push 分支触发：自动生成 beta 版本号
+            # 格式：v0.0.0-beta.YYYYMMDD.HHMMSS+短SHA
+            DATE=$(date -u +%Y%m%d.%H%M%S)
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            VERSION="v0.0.0-beta.${DATE}+${SHORT_SHA}"
+          fi
+          TAG_NAME="${VERSION}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          echo "Generated version: ${VERSION}"
+
+  # ================================================================
   # Job 1: 测试（必须通过才能发布）
   # ================================================================
   test:
     name: Test before release
     runs-on: ubuntu-latest
+    needs: [version]
     steps:
       - uses: actions/checkout@v4
 
@@ -40,7 +76,7 @@ jobs:
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [version, test]
 
     strategy:
       matrix:
@@ -77,7 +113,7 @@ jobs:
           CGO_ENABLED: 0
         run: |
           go build \
-            -ldflags="-s -w -X main.Version=${{ github.ref_name }} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.Commit=${{ github.sha }}" \
+            -ldflags="-s -w -X main.Version=${{ needs.version.outputs.version }} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.Commit=${{ github.sha }}" \
             -o ${{ matrix.asset_name }} \
             ./cmd/client-card
 
@@ -107,7 +143,7 @@ jobs:
   # ================================================================
   build-driver:
     name: Build pkcs11-mock driver
-    needs: [test]
+    needs: [version, test]
     strategy:
       matrix:
         include:
@@ -150,7 +186,7 @@ jobs:
   release:
     name: Create Beta Release
     runs-on: ubuntu-latest
-    needs: [build, build-driver]
+    needs: [version, build, build-driver]
     permissions:
       contents: write
 
@@ -164,17 +200,30 @@ jobs:
         with:
           path: dist/
 
+      - name: Create git tag (branch push only)
+        # push 分支时没有 tag，需要先创建
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          TAG="${{ needs.version.outputs.tag_name }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${TAG}" "${{ github.sha }}"
+          git push origin "${TAG}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Generate changelog
         id: changelog
         run: |
-          # 获取上一个 tag
-          PREV_TAG=$(git tag --sort=-version:refname | grep -v "${{ github.ref_name }}" | head -1)
+          TAG="${{ needs.version.outputs.tag_name }}"
+          # 获取上一个 tag（排除刚创建的这个）
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${TAG}$" | head -1)
           if [ -z "$PREV_TAG" ]; then
             PREV_TAG=$(git rev-list --max-parents=0 HEAD)
           fi
           echo "## 变更内容" > CHANGELOG.md
           echo "" >> CHANGELOG.md
-          git log ${PREV_TAG}..${{ github.ref_name }} \
+          git log "${PREV_TAG}..HEAD" \
             --pretty=format:"- %s (%h)" \
             --no-merges >> CHANGELOG.md || \
           git log --pretty=format:"- %s (%h)" --no-merges -20 >> CHANGELOG.md
@@ -187,6 +236,9 @@ jobs:
           echo "### 安装说明" >> CHANGELOG.md
           echo "- Linux/macOS: 解压 \`.tar.gz\` 后运行 \`./client-card\`" >> CHANGELOG.md
           echo "- Windows: 解压 \`.zip\` 后运行 \`client-card.exe\`" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "**Commit**: ${{ github.sha }}" >> CHANGELOG.md
+          echo "**Branch**: ${{ github.ref_name }}" >> CHANGELOG.md
           cat CHANGELOG.md
 
       - name: List dist files
@@ -195,8 +247,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: "${{ env.APP_NAME }} ${{ github.ref_name }}"
+          tag_name: ${{ needs.version.outputs.tag_name }}
+          name: "${{ env.APP_NAME }} ${{ needs.version.outputs.version }}"
           body_path: CHANGELOG.md
           prerelease: true
           draft: false
