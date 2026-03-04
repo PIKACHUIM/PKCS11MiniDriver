@@ -198,12 +198,11 @@ func TestTPM2DeviceBinding(t *testing.T) {
 // getMasterKeyForTest 通过 TPM Unseal 获取测试用主密钥。
 func getMasterKeyForTest(t *testing.T, card *storage.Card, tpmProv tpm.Provider, pin string) []byte {
 	t.Helper()
-	import_cryptoutil := struct{ HMACSHA256 func([]byte, []byte) []byte }{}
-	_ = import_cryptoutil
-
-	// 直接通过 slot 登录获取主密钥
-	// 这里使用一个临时 slot 来获取主密钥
-	return nil // 实际通过 slot.MasterKey() 获取
+	_ = card
+	_ = tpmProv
+	_ = pin
+	// 直接通过 slot 登录获取主密钥，此处为占位实现
+	return nil
 }
 
 // zeroTestKey 清零测试密钥。

@@ -1,6 +1,6 @@
-//go:build darwin
+//go:build darwin && cgo
 
-// Package tpm - macOS T2/Secure Enclave 实现。
+// Package tpm - macOS T2/Secure Enclave 实现（CGO 版本）。
 // 使用 macOS Keychain 存储绑定密钥，通过 Secure Enclave 保护。
 //
 // 实现策略：
