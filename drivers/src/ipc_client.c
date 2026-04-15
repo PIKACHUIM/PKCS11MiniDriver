@@ -22,9 +22,8 @@
 #  include <sys/un.h>
 #  include <errno.h>
 #  include <fcntl.h>
-#  ifdef __APPLE__
-#    include <unistd.h>
-#  endif
+#  include <time.h>
+#  include <unistd.h>
 #endif
 
 /* ---- 全局连接句柄 ---- */
@@ -304,8 +303,107 @@ int ipc_call(ipc_fd_t fd, uint32_t cmd,
 }
 
 /* ================================================================
- * 全局连接（单例）
+ * 全局连接（单例）+ 版本协商 + 心跳
  * ================================================================ */
+
+/* 心跳失败计数 */
+static int g_heartbeat_failures = 0;
+#define MAX_HEARTBEAT_FAILURES 3
+
+/**
+ * ipc_handshake - 版本协商握手。
+ * 连接成功后发送 CMD_HANDSHAKE + {"version":1}，
+ * 检查响应中的 "compatible" 字段。
+ * 返回 0 成功，-1 不兼容。
+ */
+static int ipc_handshake(ipc_fd_t fd)
+{
+    const char *req = "{\"version\":1}";
+    char *resp = NULL;
+    uint32_t rv = 0;
+
+    int ret = ipc_call(fd, CMD_HANDSHAKE, req, &resp, &rv);
+    if (ret != 0) {
+        /* 通信失败，可能是旧版本服务端不支持握手，降级允许 */
+        return 0;
+    }
+
+    if (rv != IPC_CKR_OK) {
+        if (resp) free(resp);
+        return -1; /* 服务端明确拒绝 */
+    }
+
+    /* 检查 compatible 字段 */
+    int compatible = 1;
+    if (resp != NULL) {
+        const char *pos = strstr(resp, "\"compatible\":");
+        if (pos != NULL) {
+            /* 解析 true/false */
+            pos += 13;
+            while (*pos == ' ') pos++;
+            if (*pos == 'f' || *pos == '0') {
+                compatible = 0;
+            }
+        }
+        free(resp);
+    }
+
+    return compatible ? 0 : -1;
+}
+
+/**
+ * ipc_send_ping - 发送心跳 Ping。
+ * 返回 0 成功，-1 失败。
+ */
+int ipc_send_ping(ipc_fd_t fd)
+{
+    char *resp = NULL;
+    uint32_t rv = 0;
+    int ret = ipc_call(fd, CMD_PING, NULL, &resp, &rv);
+    if (resp) free(resp);
+    return (ret == 0 && rv == IPC_CKR_OK) ? 0 : -1;
+}
+
+/**
+ * ipc_check_heartbeat - 检查心跳，失败时尝试重连。
+ * 返回 0 连接正常，-1 彻底断开。
+ */
+int ipc_check_heartbeat(void)
+{
+    if (g_fd == IPC_INVALID_FD)
+        return -1;
+
+    if (ipc_send_ping(g_fd) == 0) {
+        g_heartbeat_failures = 0;
+        return 0;
+    }
+
+    g_heartbeat_failures++;
+    if (g_heartbeat_failures >= MAX_HEARTBEAT_FAILURES) {
+        /* 3 次心跳失败，关闭连接并尝试重连 */
+        ipc_global_disconnect();
+
+        /* 指数退避重连：1s, 2s, 4s */
+        int delays[] = {1000, 2000, 4000};
+        int i;
+        for (i = 0; i < 3; i++) {
+            platform_sleep_ms(delays[i]);
+            g_fd = platform_connect();
+            if (g_fd != IPC_INVALID_FD) {
+                /* 重连成功，重新握手 */
+                if (ipc_handshake(g_fd) == 0) {
+                    g_heartbeat_failures = 0;
+                    return 0;
+                }
+                /* 握手失败，断开重试 */
+                platform_disconnect(g_fd);
+                g_fd = IPC_INVALID_FD;
+            }
+        }
+        return -1; /* 重连失败 */
+    }
+    return 0; /* 还未达到阈值，暂时忽略 */
+}
 
 int ipc_global_connect(void)
 {
@@ -314,7 +412,19 @@ int ipc_global_connect(void)
 
     /* 尝试连接，最多重试 5 次，每次间隔 500ms */
     g_fd = ipc_connect(5, 500);
-    return (g_fd != IPC_INVALID_FD) ? 0 : -1;
+    if (g_fd == IPC_INVALID_FD)
+        return -1;
+
+    /* 版本协商握手 */
+    if (ipc_handshake(g_fd) != 0) {
+        /* 版本不兼容，断开连接 */
+        ipc_disconnect(g_fd);
+        g_fd = IPC_INVALID_FD;
+        return -1;
+    }
+
+    g_heartbeat_failures = 0;
+    return 0;
 }
 
 void ipc_global_disconnect(void)

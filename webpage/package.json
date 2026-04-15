@@ -1,21 +1,26 @@
 {
-  "name": "webpage",
+  "name": "opencert-manager",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron:dev": "vite build && electron .",
+    "electron:build": "vite build && electron-builder"
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
     "antd": "^6.3.1",
     "axios": "^1.13.6",
     "dayjs": "^1.11.19",
+    "i18next": "^24.2.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-i18next": "^15.4.1",
     "react-router-dom": "^7.13.1",
     "zustand": "^5.0.11"
   },
@@ -25,6 +30,8 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",

@@ -272,6 +272,47 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetInfo)(CK_INFO_PTR pInfo)
 	if (NULL == pInfo)
 		return CKR_ARGUMENTS_BAD;
 
+	/* 尝试通过 IPC 获取库信息 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_GET_INFO, NULL, &resp, &rv);
+		if (ret == 0 && rv == CKR_OK && resp != NULL) {
+			/* 解析响应中的库信息 */
+			const char *manufacturer = json_get_string(resp, "manufacturer_id");
+			const char *description = json_get_string(resp, "library_description");
+			int lib_major = json_get_int(resp, "library_version_major", 1);
+			int lib_minor = json_get_int(resp, "library_version_minor", 0);
+
+			pInfo->cryptokiVersion.major = 0x02;
+			pInfo->cryptokiVersion.minor = 0x14;
+			pInfo->flags = 0;
+
+			memset(pInfo->manufacturerID, ' ', sizeof(pInfo->manufacturerID));
+			if (manufacturer) {
+				size_t len = strlen(manufacturer);
+				if (len > sizeof(pInfo->manufacturerID)) len = sizeof(pInfo->manufacturerID);
+				memcpy(pInfo->manufacturerID, manufacturer, len);
+			}
+
+			memset(pInfo->libraryDescription, ' ', sizeof(pInfo->libraryDescription));
+			if (description) {
+				size_t len = strlen(description);
+				if (len > sizeof(pInfo->libraryDescription)) len = sizeof(pInfo->libraryDescription);
+				memcpy(pInfo->libraryDescription, description, len);
+			}
+
+			pInfo->libraryVersion.major = (CK_BYTE)lib_major;
+			pInfo->libraryVersion.minor = (CK_BYTE)lib_minor;
+
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+	}
+
+	/* IPC 不可用时回退到硬编码值 */
 	pInfo->cryptokiVersion.major = 0x02;
 	pInfo->cryptokiVersion.minor = 0x14;
 	memset(pInfo->manufacturerID, ' ', sizeof(pInfo->manufacturerID));
@@ -374,11 +415,53 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetSlotInfo)(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pIn
 	if (CK_FALSE == pkcs11_mock_initialized)
 		return CKR_CRYPTOKI_NOT_INITIALIZED;
 
-	if (PKCS11_MOCK_CK_SLOT_ID != slotID)
-		return CKR_SLOT_ID_INVALID;
-
 	if (NULL == pInfo)
 		return CKR_ARGUMENTS_BAD;
+
+	/* 尝试通过 IPC 获取 Slot 信息 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"slot_id\":%lu}", (unsigned long)slotID);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_GET_SLOT_INFO, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == CKR_OK && resp != NULL) {
+			const char *desc = json_get_string(resp, "slot_description");
+			const char *mfr = json_get_string(resp, "manufacturer_id");
+
+			memset(pInfo->slotDescription, ' ', sizeof(pInfo->slotDescription));
+			if (desc) {
+				size_t len = strlen(desc);
+				if (len > sizeof(pInfo->slotDescription)) len = sizeof(pInfo->slotDescription);
+				memcpy(pInfo->slotDescription, desc, len);
+			}
+			memset(pInfo->manufacturerID, ' ', sizeof(pInfo->manufacturerID));
+			if (mfr) {
+				size_t len = strlen(mfr);
+				if (len > sizeof(pInfo->manufacturerID)) len = sizeof(pInfo->manufacturerID);
+				memcpy(pInfo->manufacturerID, mfr, len);
+			}
+			pInfo->flags = (CK_FLAGS)json_get_int(resp, "flags", CKF_TOKEN_PRESENT);
+			pInfo->hardwareVersion.major = (CK_BYTE)json_get_int(resp, "hw_major", 1);
+			pInfo->hardwareVersion.minor = (CK_BYTE)json_get_int(resp, "hw_minor", 0);
+			pInfo->firmwareVersion.major = (CK_BYTE)json_get_int(resp, "fw_major", 1);
+			pInfo->firmwareVersion.minor = (CK_BYTE)json_get_int(resp, "fw_minor", 0);
+
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+		if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
+	}
+
+	/* IPC 不可用时回退到硬编码值 */
+	if (PKCS11_MOCK_CK_SLOT_ID != slotID)
+		return CKR_SLOT_ID_INVALID;
 
 	memset(pInfo->slotDescription, ' ', sizeof(pInfo->slotDescription));
 	memcpy(pInfo->slotDescription, PKCS11_MOCK_CK_SLOT_INFO_SLOT_DESCRIPTION, strlen(PKCS11_MOCK_CK_SLOT_INFO_SLOT_DESCRIPTION));
@@ -405,6 +488,59 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetTokenInfo)(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR p
 	if (NULL == pInfo)
 		return CKR_ARGUMENTS_BAD;
 
+	/* 尝试通过 IPC 获取真实 Token 信息 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"slot_id\":%lu}", (unsigned long)slotID);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_GET_TOKEN_INFO, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == IPC_CKR_OK && resp != NULL) {
+			/* 解析 label、manufacturer_id、model、serial_number、flags */
+			char *label_s = json_get_string(resp, "label");
+			char *mfr_s = json_get_string(resp, "manufacturer_id");
+			char *model_s = json_get_string(resp, "model");
+			char *serial_s = json_get_string(resp, "serial_number");
+			uint32_t flags32 = 0;
+			json_get_uint32(resp, "flags", &flags32);
+
+			memset(pInfo->label, ' ', sizeof(pInfo->label));
+			if (label_s) { memcpy(pInfo->label, label_s, strlen(label_s) < 32 ? strlen(label_s) : 32); free(label_s); }
+			memset(pInfo->manufacturerID, ' ', sizeof(pInfo->manufacturerID));
+			if (mfr_s) { memcpy(pInfo->manufacturerID, mfr_s, strlen(mfr_s) < 32 ? strlen(mfr_s) : 32); free(mfr_s); }
+			memset(pInfo->model, ' ', sizeof(pInfo->model));
+			if (model_s) { memcpy(pInfo->model, model_s, strlen(model_s) < 16 ? strlen(model_s) : 16); free(model_s); }
+			memset(pInfo->serialNumber, ' ', sizeof(pInfo->serialNumber));
+			if (serial_s) { memcpy(pInfo->serialNumber, serial_s, strlen(serial_s) < 16 ? strlen(serial_s) : 16); free(serial_s); }
+			pInfo->flags = flags32 ? (CK_FLAGS)flags32 : (CKF_RNG | CKF_LOGIN_REQUIRED | CKF_USER_PIN_INITIALIZED | CKF_TOKEN_INITIALIZED);
+			pInfo->ulMaxSessionCount = CK_EFFECTIVELY_INFINITE;
+			pInfo->ulSessionCount = (CK_TRUE == pkcs11_mock_session_opened) ? 1 : 0;
+			pInfo->ulMaxRwSessionCount = CK_EFFECTIVELY_INFINITE;
+			pInfo->ulRwSessionCount = ((CK_TRUE == pkcs11_mock_session_opened) && ((CKS_RO_PUBLIC_SESSION != pkcs11_mock_session_state) && (CKS_RO_USER_FUNCTIONS != pkcs11_mock_session_state))) ? 1 : 0;
+			pInfo->ulMaxPinLen = PKCS11_MOCK_CK_TOKEN_INFO_MAX_PIN_LEN;
+			pInfo->ulMinPinLen = PKCS11_MOCK_CK_TOKEN_INFO_MIN_PIN_LEN;
+			pInfo->ulTotalPublicMemory = CK_UNAVAILABLE_INFORMATION;
+			pInfo->ulFreePublicMemory = CK_UNAVAILABLE_INFORMATION;
+			pInfo->ulTotalPrivateMemory = CK_UNAVAILABLE_INFORMATION;
+			pInfo->ulFreePrivateMemory = CK_UNAVAILABLE_INFORMATION;
+			pInfo->hardwareVersion.major = 0x01;
+			pInfo->hardwareVersion.minor = 0x00;
+			pInfo->firmwareVersion.major = 0x01;
+			pInfo->firmwareVersion.minor = 0x00;
+			memset(pInfo->utcTime, ' ', sizeof(pInfo->utcTime));
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+		/* IPC 失败，降级到硬编码 */
+	}
+
+	/* 硬编码降级 */
 	memset(pInfo->label, ' ', sizeof(pInfo->label));
 	memcpy(pInfo->label, PKCS11_MOCK_CK_TOKEN_INFO_LABEL, strlen(PKCS11_MOCK_CK_TOKEN_INFO_LABEL));
 	memset(pInfo->manufacturerID, ' ', sizeof(pInfo->manufacturerID));
@@ -445,6 +581,58 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetMechanismList)(CK_SLOT_ID slotID, CK_MECHANISM_TY
 	if (NULL == pulCount)
 		return CKR_ARGUMENTS_BAD;
 
+	/* 尝试通过 IPC 获取真实机制列表 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"slot_id\":%lu}", (unsigned long)slotID);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_GET_MECHANISM_LIST, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == IPC_CKR_OK && resp != NULL) {
+			/* 解析 mechanisms 数组：{"rv":0,"data":{"mechanisms":[262,3,...], "count":N}} */
+			uint32_t count32 = 0;
+			json_get_uint32(resp, "count", &count32);
+			unsigned long count = (unsigned long)count32;
+
+			if (NULL == pMechanismList) {
+				*pulCount = (CK_ULONG)count;
+				free(resp);
+				return CKR_OK;
+			}
+
+			if (*pulCount < (CK_ULONG)count) {
+				free(resp);
+				return CKR_BUFFER_TOO_SMALL;
+			}
+
+			/* 解析 mechanisms 数组 */
+			const char *arr = strstr(resp, "\"mechanisms\":[");
+			if (arr != NULL) {
+				arr += strlen("\"mechanisms\":[");
+				CK_ULONG i = 0;
+				while (i < (CK_ULONG)count && *arr != ']' && *arr != '\0') {
+					while (*arr == ' ' || *arr == ',') arr++;
+					if (*arr == ']' || *arr == '\0') break;
+					unsigned long mech = 0;
+					mech = strtoul(arr, NULL, 10);
+					pMechanismList[i++] = (CK_MECHANISM_TYPE)mech;
+					while (*arr != ',' && *arr != ']' && *arr != '\0') arr++;
+				}
+				*pulCount = i;
+			}
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+		/* IPC 失败，降级到硬编码 */
+	}
+
+	/* 硬编码降级 */
 	if (NULL == pMechanismList)
 	{
 		*pulCount = 9;
@@ -482,6 +670,35 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetMechanismInfo)(CK_SLOT_ID slotID, CK_MECHANISM_TY
 	if (NULL == pInfo)
 		return CKR_ARGUMENTS_BAD;
 
+	/* 尝试通过 IPC 获取真实机制信息 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"slot_id\":%lu,\"mechanism\":%lu}",
+			(unsigned long)slotID, (unsigned long)type);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_GET_MECHANISM_INFO, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == IPC_CKR_OK && resp != NULL) {
+			uint32_t min_key32 = 0, max_key32 = 0, flags32 = 0;
+			json_get_uint32(resp, "min_key_size", &min_key32);
+			json_get_uint32(resp, "max_key_size", &max_key32);
+			json_get_uint32(resp, "flags", &flags32);
+			pInfo->ulMinKeySize = (CK_ULONG)min_key32;
+			pInfo->ulMaxKeySize = (CK_ULONG)max_key32;
+			pInfo->flags = (CK_FLAGS)flags32;
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+		/* IPC 失败，降级到硬编码 */
+	}
+
+	/* 硬编码降级 */
 	switch (type)
 	{
 		case CKM_RSA_PKCS_KEY_PAIR_GEN:
@@ -587,6 +804,27 @@ CK_DEFINE_FUNCTION(CK_RV, C_InitPIN)(CK_SESSION_HANDLE hSession, CK_UTF8CHAR_PTR
 	if ((ulPinLen < PKCS11_MOCK_CK_TOKEN_INFO_MIN_PIN_LEN) || (ulPinLen > PKCS11_MOCK_CK_TOKEN_INFO_MAX_PIN_LEN))
 		return CKR_PIN_LEN_RANGE;
 
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		char pin_str[PKCS11_MOCK_CK_TOKEN_INFO_MAX_PIN_LEN + 1];
+		memcpy(pin_str, pPin, ulPinLen);
+		pin_str[ulPinLen] = '\0';
+
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu,\"pin\":\"%s\"}",
+			(unsigned long)hSession, pin_str);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_INIT_PIN, req.buf, &resp, &rv);
+		json_buf_free(&req);
+		if (resp) free(resp);
+
+		if (ret == 0) return (CK_RV)rv;
+	}
+
 	return CKR_OK;
 }
 
@@ -613,6 +851,28 @@ CK_DEFINE_FUNCTION(CK_RV, C_SetPIN)(CK_SESSION_HANDLE hSession, CK_UTF8CHAR_PTR 
 
 	if ((ulNewLen < PKCS11_MOCK_CK_TOKEN_INFO_MIN_PIN_LEN) || (ulNewLen > PKCS11_MOCK_CK_TOKEN_INFO_MAX_PIN_LEN))
 		return CKR_PIN_LEN_RANGE;
+
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		char old_str[PKCS11_MOCK_CK_TOKEN_INFO_MAX_PIN_LEN + 1];
+		char new_str[PKCS11_MOCK_CK_TOKEN_INFO_MAX_PIN_LEN + 1];
+		memcpy(old_str, pOldPin, ulOldLen); old_str[ulOldLen] = '\0';
+		memcpy(new_str, pNewPin, ulNewLen); new_str[ulNewLen] = '\0';
+
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu,\"old_pin\":\"%s\",\"new_pin\":\"%s\"}",
+			(unsigned long)hSession, old_str, new_str);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_SET_PIN, req.buf, &resp, &rv);
+		json_buf_free(&req);
+		if (resp) free(resp);
+
+		if (ret == 0) return (CK_RV)rv;
+	}
 
 	return CKR_OK;
 }
@@ -709,6 +969,28 @@ CK_DEFINE_FUNCTION(CK_RV, C_CloseAllSessions)(CK_SLOT_ID slotID)
 	if (CK_FALSE == pkcs11_mock_initialized)
 		return CKR_CRYPTOKI_NOT_INITIALIZED;
 
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"slot_id\":%lu}", (unsigned long)slotID);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_CLOSE_ALL_SESSIONS, req.buf, &resp, &rv);
+		json_buf_free(&req);
+		if (resp) free(resp);
+
+		if (ret == 0 && rv == CKR_OK) {
+			pkcs11_mock_session_opened = CK_FALSE;
+			pkcs11_mock_session_state = CKS_RO_PUBLIC_SESSION;
+			pkcs11_mock_active_operation = PKCS11_MOCK_CK_OPERATION_NONE;
+			return CKR_OK;
+		}
+		if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
+	}
+
 	if (PKCS11_MOCK_CK_SLOT_ID != slotID)
 		return CKR_SLOT_ID_INVALID;
 
@@ -725,11 +1007,36 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetSessionInfo)(CK_SESSION_HANDLE hSession, CK_SESSI
 	if (CK_FALSE == pkcs11_mock_initialized)
 		return CKR_CRYPTOKI_NOT_INITIALIZED;
 
-	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
-		return CKR_SESSION_HANDLE_INVALID;
-
 	if (NULL == pInfo)
 		return CKR_ARGUMENTS_BAD;
+
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu}", (unsigned long)hSession);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_GET_SESSION_INFO, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == CKR_OK && resp != NULL) {
+			pInfo->slotID = (CK_SLOT_ID)json_get_int(resp, "slot_id", 0);
+			pInfo->state = (CK_STATE)json_get_int(resp, "state", CKS_RO_PUBLIC_SESSION);
+			pInfo->flags = (CK_FLAGS)json_get_int(resp, "flags", CKF_SERIAL_SESSION);
+			pInfo->ulDeviceError = 0;
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+		if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
+	}
+
+	/* IPC 不可用时回退到本地状态 */
+	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
+		return CKR_SESSION_HANDLE_INVALID;
 
 	pInfo->slotID = PKCS11_MOCK_CK_SLOT_ID;
 	pInfo->state = pkcs11_mock_session_state;
@@ -873,11 +1180,41 @@ CK_DEFINE_FUNCTION(CK_RV, C_Logout)(CK_SESSION_HANDLE hSession)
 	if (CK_FALSE == pkcs11_mock_initialized)
 		return CKR_CRYPTOKI_NOT_INITIALIZED;
 
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu}", (unsigned long)hSession);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_LOGOUT, req.buf, &resp, &rv);
+		json_buf_free(&req);
+		if (resp) free(resp);
+
+		if (ret == 0 && rv == CKR_OK) {
+			/* 更新本地状态 */
+			if (pkcs11_mock_session_state == CKS_RO_USER_FUNCTIONS)
+				pkcs11_mock_session_state = CKS_RO_PUBLIC_SESSION;
+			else if (pkcs11_mock_session_state == CKS_RW_USER_FUNCTIONS || pkcs11_mock_session_state == CKS_RW_SO_FUNCTIONS)
+				pkcs11_mock_session_state = CKS_RW_PUBLIC_SESSION;
+			return CKR_OK;
+		}
+		if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
+	}
+
+	/* IPC 不可用时回退到本地状态 */
 	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
 		return CKR_SESSION_HANDLE_INVALID;
 
 	if ((pkcs11_mock_session_state == CKS_RO_PUBLIC_SESSION) || (pkcs11_mock_session_state == CKS_RW_PUBLIC_SESSION))
 		return CKR_USER_NOT_LOGGED_IN;
+
+	if (pkcs11_mock_session_state == CKS_RO_USER_FUNCTIONS)
+		pkcs11_mock_session_state = CKS_RO_PUBLIC_SESSION;
+	else if (pkcs11_mock_session_state == CKS_RW_USER_FUNCTIONS || pkcs11_mock_session_state == CKS_RW_SO_FUNCTIONS)
+		pkcs11_mock_session_state = CKS_RW_PUBLIC_SESSION;
 
 	return CKR_OK;
 }
@@ -909,6 +1246,28 @@ CK_DEFINE_FUNCTION(CK_RV, C_CreateObject)(CK_SESSION_HANDLE hSession, CK_ATTRIBU
 
 		if (0 >= pTemplate[i].ulValueLen)
 			return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu,\"attr_count\":%lu}",
+			(unsigned long)hSession, (unsigned long)ulCount);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_CREATE_OBJECT, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == CKR_OK && resp != NULL) {
+			*phObject = (CK_OBJECT_HANDLE)json_get_int(resp, "handle", PKCS11_MOCK_CK_OBJECT_HANDLE_DATA);
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+		if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
 	}
 
 	*phObject = PKCS11_MOCK_CK_OBJECT_HANDLE_DATA;
@@ -959,6 +1318,23 @@ CK_DEFINE_FUNCTION(CK_RV, C_DestroyObject)(CK_SESSION_HANDLE hSession, CK_OBJECT
 	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
 		return CKR_SESSION_HANDLE_INVALID;
 
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu,\"handle\":%lu}",
+			(unsigned long)hSession, (unsigned long)hObject);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_DESTROY_OBJECT, req.buf, &resp, &rv);
+		json_buf_free(&req);
+		if (resp) free(resp);
+
+		if (ret == 0) return (CK_RV)rv;
+	}
+
 	if ((PKCS11_MOCK_CK_OBJECT_HANDLE_DATA != hObject) &&
 		(PKCS11_MOCK_CK_OBJECT_HANDLE_SECRET_KEY != hObject) &&
 		(PKCS11_MOCK_CK_OBJECT_HANDLE_PUBLIC_KEY != hObject) &&
@@ -986,6 +1362,31 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetObjectSize)(CK_SESSION_HANDLE hSession, CK_OBJECT
 	if (NULL == pulSize)
 		return CKR_ARGUMENTS_BAD;
 
+	/* 尝试通过 IPC 获取真实对象大小 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu,\"object_handle\":%lu}",
+			(unsigned long)hSession, (unsigned long)hObject);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_GET_OBJECT_SIZE, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == IPC_CKR_OK && resp != NULL) {
+			uint32_t size32 = 0;
+			json_get_uint32(resp, "size", &size32);
+			*pulSize = (CK_ULONG)size32;
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+		/* IPC 失败，降级到硬编码 */
+	}
+
+	/* 硬编码降级 */
 	*pulSize = PKCS11_MOCK_CK_OBJECT_SIZE;
 
 	return CKR_OK;
@@ -1138,6 +1539,41 @@ CK_DEFINE_FUNCTION(CK_RV, C_SetAttributeValue)(CK_SESSION_HANDLE hSession, CK_OB
 	if (0 >= ulCount)
 		return CKR_ARGUMENTS_BAD;
 
+	/* 尝试通过 IPC 设置属性 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req,
+			"{\"session_id\":%lu,\"object_handle\":%lu,\"attrs\":[",
+			(unsigned long)hSession, (unsigned long)hObject);
+
+		for (i = 0; i < ulCount; i++) {
+			if (NULL == pTemplate[i].pValue || 0 >= pTemplate[i].ulValueLen)
+				continue;
+			if (i > 0) json_buf_append(&req, ",");
+			json_buf_appendf(&req, "{\"type\":%lu,\"value\":",
+				(unsigned long)pTemplate[i].type);
+			json_buf_append_b64(&req,
+				(const uint8_t *)pTemplate[i].pValue,
+				(size_t)pTemplate[i].ulValueLen);
+			json_buf_append(&req, "}");
+		}
+		json_buf_append(&req, "]}");
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_SET_ATTRIBUTE_VALUE, req.buf, &resp, &rv);
+		json_buf_free(&req);
+		if (resp) free(resp);
+
+		if (ret == 0 && rv == IPC_CKR_OK) {
+			return CKR_OK;
+		}
+		/* IPC 失败，降级到硬编码 */
+	}
+
+	/* 硬编码降级 */
 	for (i = 0; i < ulCount; i++)
 	{
 		if ((CKA_LABEL == pTemplate[i].type) || (CKA_VALUE == pTemplate[i].type))
@@ -1282,16 +1718,46 @@ CK_DEFINE_FUNCTION(CK_RV, C_FindObjects)(CK_SESSION_HANDLE hSession, CK_OBJECT_H
 	if (PKCS11_MOCK_CK_OPERATION_FIND != pkcs11_mock_active_operation)
 		return CKR_OPERATION_NOT_INITIALIZED;
 
-	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
-		return CKR_SESSION_HANDLE_INVALID;
-
 	if ((NULL == phObject) && (0 < ulMaxObjectCount))
 		return CKR_ARGUMENTS_BAD;
 
 	if (NULL == pulObjectCount)
 		return CKR_ARGUMENTS_BAD;
 
-	/* 从 find_results 数组中返回对象 */
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu,\"max_count\":%lu}",
+			(unsigned long)hSession, (unsigned long)ulMaxObjectCount);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_FIND_OBJECTS, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == CKR_OK && resp != NULL) {
+			/* 解析返回的对象句柄数组 */
+			int count = json_get_int(resp, "count", 0);
+			if (count > (int)ulMaxObjectCount) count = (int)ulMaxObjectCount;
+			for (int i = 0; i < count; i++) {
+				char key[32];
+				snprintf(key, sizeof(key), "handles[%d]", i);
+				phObject[i] = (CK_OBJECT_HANDLE)json_get_int(resp, key, 0);
+			}
+			*pulObjectCount = (CK_ULONG)count;
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+		if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
+	}
+
+	/* IPC 不可用时回退到本地状态 */
+	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
+		return CKR_SESSION_HANDLE_INVALID;
+
 	CK_ULONG returned = 0;
 	while (returned < ulMaxObjectCount && pkcs11_mock_find_pos < pkcs11_mock_find_count) {
 		phObject[returned++] = pkcs11_mock_find_results[pkcs11_mock_find_pos++];
@@ -1309,6 +1775,26 @@ CK_DEFINE_FUNCTION(CK_RV, C_FindObjectsFinal)(CK_SESSION_HANDLE hSession)
 
 	if (PKCS11_MOCK_CK_OPERATION_FIND != pkcs11_mock_active_operation)
 		return CKR_OPERATION_NOT_INITIALIZED;
+
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu}", (unsigned long)hSession);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_FIND_OBJECTS_FINAL, req.buf, &resp, &rv);
+		json_buf_free(&req);
+		if (resp) free(resp);
+
+		if (ret == 0 && rv == CKR_OK) {
+			pkcs11_mock_active_operation = PKCS11_MOCK_CK_OPERATION_NONE;
+			return CKR_OK;
+		}
+		if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
+	}
 
 	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
 		return CKR_SESSION_HANDLE_INVALID;
@@ -1850,6 +2336,31 @@ CK_DEFINE_FUNCTION(CK_RV, C_DigestInit)(CK_SESSION_HANDLE hSession, CK_MECHANISM
 	if (CK_FALSE == pkcs11_mock_initialized)
 		return CKR_CRYPTOKI_NOT_INITIALIZED;
 
+	if (NULL == pMechanism)
+		return CKR_ARGUMENTS_BAD;
+
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu,\"mechanism\":%lu}",
+			(unsigned long)hSession, (unsigned long)pMechanism->mechanism);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_DIGEST_INIT, req.buf, &resp, &rv);
+		json_buf_free(&req);
+		if (resp) free(resp);
+
+		if (ret == 0 && rv == CKR_OK) {
+			pkcs11_mock_active_operation = PKCS11_MOCK_CK_OPERATION_DIGEST;
+			return CKR_OK;
+		}
+		if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
+	}
+
+	/* IPC 不可用时回退到本地逻辑 */
 	if ((PKCS11_MOCK_CK_OPERATION_NONE != pkcs11_mock_active_operation) &&
 		(PKCS11_MOCK_CK_OPERATION_ENCRYPT != pkcs11_mock_active_operation) && 
 		(PKCS11_MOCK_CK_OPERATION_DECRYPT != pkcs11_mock_active_operation))
@@ -1857,9 +2368,6 @@ CK_DEFINE_FUNCTION(CK_RV, C_DigestInit)(CK_SESSION_HANDLE hSession, CK_MECHANISM
 
 	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
 		return CKR_SESSION_HANDLE_INVALID;
-
-	if (NULL == pMechanism)
-		return CKR_ARGUMENTS_BAD;
 
 	if (CKM_SHA_1 != pMechanism->mechanism)
 		return CKR_MECHANISM_INVALID;
@@ -1896,17 +2404,61 @@ CK_DEFINE_FUNCTION(CK_RV, C_Digest)(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pDat
 	if (PKCS11_MOCK_CK_OPERATION_DIGEST != pkcs11_mock_active_operation)
 		return CKR_OPERATION_NOT_INITIALIZED;
 
+	if (NULL == pData || 0 >= ulDataLen || NULL == pulDigestLen)
+		return CKR_ARGUMENTS_BAD;
+
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		char *data_b64 = base64_encode(pData, ulDataLen);
+		if (data_b64) {
+			json_buf_t req;
+			json_buf_init(&req);
+			json_buf_appendf(&req, "{\"session_id\":%lu,\"data\":\"%s\"}",
+				(unsigned long)hSession, data_b64);
+			free(data_b64);
+
+			char *resp = NULL;
+			uint32_t rv = 0;
+			int ret = ipc_call(fd, CMD_DIGEST, req.buf, &resp, &rv);
+			json_buf_free(&req);
+
+			if (ret == 0 && rv == CKR_OK && resp != NULL) {
+				const char *digest_b64 = json_get_string(resp, "digest");
+				if (digest_b64) {
+					size_t decoded_len = 0;
+					unsigned char *decoded = base64_decode(digest_b64, &decoded_len);
+					if (decoded) {
+						if (NULL == pDigest) {
+							*pulDigestLen = (CK_ULONG)decoded_len;
+							free(decoded);
+							free(resp);
+							return CKR_OK;
+						}
+						if (*pulDigestLen < (CK_ULONG)decoded_len) {
+							*pulDigestLen = (CK_ULONG)decoded_len;
+							free(decoded);
+							free(resp);
+							return CKR_BUFFER_TOO_SMALL;
+						}
+						memcpy(pDigest, decoded, decoded_len);
+						*pulDigestLen = (CK_ULONG)decoded_len;
+						pkcs11_mock_active_operation = PKCS11_MOCK_CK_OPERATION_NONE;
+						free(decoded);
+						free(resp);
+						return CKR_OK;
+					}
+				}
+				free(resp);
+			}
+			if (resp) free(resp);
+			if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
+		}
+	}
+
+	/* IPC 不可用时回退到本地硬编码哈希 */
 	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
 		return CKR_SESSION_HANDLE_INVALID;
-
-	if (NULL == pData)
-		return CKR_ARGUMENTS_BAD;
-
-	if (0 >= ulDataLen)
-		return CKR_ARGUMENTS_BAD;
-
-	if (NULL == pulDigestLen)
-		return CKR_ARGUMENTS_BAD;
 
 	if (NULL != pDigest)
 	{
@@ -2183,6 +2735,28 @@ CK_DEFINE_FUNCTION(CK_RV, C_SignUpdate)(CK_SESSION_HANDLE hSession, CK_BYTE_PTR 
 	if (0 >= ulPartLen)
 		return CKR_ARGUMENTS_BAD;
 
+	/* 尝试通过 IPC 转发 SignUpdate */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu,\"part\":", (unsigned long)hSession);
+		json_buf_append_b64(&req, (const uint8_t *)pPart, (size_t)ulPartLen);
+		json_buf_append(&req, "}");
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_SIGN_UPDATE, req.buf, &resp, &rv);
+		json_buf_free(&req);
+		if (resp) free(resp);
+
+		if (ret == 0 && rv == IPC_CKR_OK) {
+			return CKR_OK;
+		}
+		/* IPC 失败，降级 */
+	}
+
+	/* 硬编码降级：接受数据但不做实际处理 */
 	return CKR_OK;
 }
 
@@ -2204,6 +2778,45 @@ CK_DEFINE_FUNCTION(CK_RV, C_SignFinal)(CK_SESSION_HANDLE hSession, CK_BYTE_PTR p
 	if (NULL == pulSignatureLen)
 		return CKR_ARGUMENTS_BAD;
 
+	/* 尝试通过 IPC 转发 SignFinal */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu}", (unsigned long)hSession);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_SIGN_FINAL, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == IPC_CKR_OK && resp != NULL) {
+			uint8_t *sig_data = NULL;
+			size_t sig_len = 0;
+			if (json_get_b64(resp, "signature", &sig_data, &sig_len) == 0) {
+				if (NULL != pSignature) {
+					if (*pulSignatureLen < (CK_ULONG)sig_len) {
+						free(sig_data);
+						free(resp);
+						return CKR_BUFFER_TOO_SMALL;
+					}
+					memcpy(pSignature, sig_data, sig_len);
+					if (PKCS11_MOCK_CK_OPERATION_SIGN == pkcs11_mock_active_operation)
+						pkcs11_mock_active_operation = PKCS11_MOCK_CK_OPERATION_NONE;
+					else
+						pkcs11_mock_active_operation = PKCS11_MOCK_CK_OPERATION_ENCRYPT;
+				}
+				*pulSignatureLen = (CK_ULONG)sig_len;
+				free(sig_data);
+			}
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+		/* IPC 失败，降级到硬编码 */
+	}
+
+	/* 硬编码降级 */
 	if (NULL != pSignature)
 	{
 		if (sizeof(signature) > *pulSignatureLen)
@@ -2335,6 +2948,28 @@ CK_DEFINE_FUNCTION(CK_RV, C_VerifyInit)(CK_SESSION_HANDLE hSession, CK_MECHANISM
 		pkcs11_mock_active_operation = PKCS11_MOCK_CK_OPERATION_VERIFY;
 	else
 		pkcs11_mock_active_operation = PKCS11_MOCK_CK_OPERATION_DECRYPT_VERIFY;
+
+	/* 通过 IPC 转发 VerifyInit */
+	{
+		ipc_fd_t fd = ipc_global_fd();
+		if (ipc_is_connected(fd)) {
+			json_buf_t req;
+			json_buf_init(&req);
+			json_buf_appendf(&req, "{\"session_id\":%lu,\"mechanism\":%lu,\"key_handle\":%lu}",
+				(unsigned long)hSession, (unsigned long)pMechanism->mechanism, (unsigned long)hKey);
+
+			char *resp = NULL;
+			uint32_t rv = 0;
+			int ret = ipc_call(fd, CMD_VERIFY_INIT, req.buf, &resp, &rv);
+			json_buf_free(&req);
+			if (resp) free(resp);
+
+			if (ret == 0 && rv != CKR_OK) {
+				pkcs11_mock_active_operation = PKCS11_MOCK_CK_OPERATION_NONE;
+				return (CK_RV)rv;
+			}
+		}
+	}
 
 	return CKR_OK;
 }
@@ -2771,6 +3406,32 @@ CK_DEFINE_FUNCTION(CK_RV, C_GenerateKeyPair)(CK_SESSION_HANDLE hSession, CK_MECH
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
+	/* 通过 IPC 转发密钥对生成 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu,\"mechanism\":%lu}",
+			(unsigned long)hSession, (unsigned long)pMechanism->mechanism);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_GENERATE_KEY_PAIR, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == CKR_OK && resp != NULL) {
+			*phPublicKey = (CK_OBJECT_HANDLE)json_get_int(resp, "pub_handle",
+				PKCS11_MOCK_CK_OBJECT_HANDLE_PUBLIC_KEY);
+			*phPrivateKey = (CK_OBJECT_HANDLE)json_get_int(resp, "priv_handle",
+				PKCS11_MOCK_CK_OBJECT_HANDLE_PRIVATE_KEY);
+			free(resp);
+			return CKR_OK;
+		}
+		if (resp) free(resp);
+		if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
+	}
+
+	/* IPC 不可用时回退到硬编码值 */
 	*phPublicKey = PKCS11_MOCK_CK_OBJECT_HANDLE_PUBLIC_KEY;
 	*phPrivateKey = PKCS11_MOCK_CK_OBJECT_HANDLE_PRIVATE_KEY;
 
@@ -2935,14 +3596,48 @@ CK_DEFINE_FUNCTION(CK_RV, C_GenerateRandom)(CK_SESSION_HANDLE hSession, CK_BYTE_
 	if (CK_FALSE == pkcs11_mock_initialized)
 		return CKR_CRYPTOKI_NOT_INITIALIZED;
 
-	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
-		return CKR_SESSION_HANDLE_INVALID;
-
 	if (NULL == RandomData)
 		return CKR_ARGUMENTS_BAD;
 
 	if (0 >= ulRandomLen)
 		return CKR_ARGUMENTS_BAD;
+
+	/* 通过 IPC 转发 */
+	ipc_fd_t fd = ipc_global_fd();
+	if (ipc_is_connected(fd)) {
+		json_buf_t req;
+		json_buf_init(&req);
+		json_buf_appendf(&req, "{\"session_id\":%lu,\"length\":%lu}",
+			(unsigned long)hSession, (unsigned long)ulRandomLen);
+
+		char *resp = NULL;
+		uint32_t rv = 0;
+		int ret = ipc_call(fd, CMD_GENERATE_RANDOM, req.buf, &resp, &rv);
+		json_buf_free(&req);
+
+		if (ret == 0 && rv == CKR_OK && resp != NULL) {
+			/* 解析 Base64 编码的随机数据 */
+			const char *data_b64 = json_get_string(resp, "data");
+			if (data_b64) {
+				size_t decoded_len = 0;
+				unsigned char *decoded = base64_decode(data_b64, &decoded_len);
+				if (decoded && decoded_len >= ulRandomLen) {
+					memcpy(RandomData, decoded, ulRandomLen);
+					free(decoded);
+					free(resp);
+					return CKR_OK;
+				}
+				if (decoded) free(decoded);
+			}
+			free(resp);
+		}
+		if (resp) free(resp);
+		if (ret == 0 && rv != CKR_OK) return (CK_RV)rv;
+	}
+
+	/* IPC 不可用时回退到本地随机 */
+	if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
+		return CKR_SESSION_HANDLE_INVALID;
 
 	memset(RandomData, 1, ulRandomLen);
 

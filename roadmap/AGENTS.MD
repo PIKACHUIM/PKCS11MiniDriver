@@ -101,23 +101,29 @@ client-card/
 | `certificates` | uuid, slot_type, card_uuid, cert_type, key_type, cert_content, temp_key_salt, temp_key_enc, private_data |
 | `logs` | uuid, log_type, slot_type, card_uuid, user_uuid, level, title, content |
 
-**IPC 协议**（Named Pipe / Unix Socket + JSON）
+**IPC 协议**（Named Pipe / Unix Socket + 二进制帧头 + JSON）
 ```
-Frame: [4字节长度(LE)] + [JSON Payload]
+Frame: Magic(4B "PK11") + Cmd(4B) + Len(4B) + JSON Payload
+       BigEndian 字节序，帧头共 12 字节
 
-Request:  { "cmd": "C_Sign", "seq": 1, "payload": {...} }
-Response: { "seq": 1, "rv": 0, "payload": {...} }
+特殊命令：
+- CmdPing      (0x0000) : 心跳，30秒空闲发送，3次无响应重连
+- CmdHandshake (0x00FF) : 版本协商，C_Initialize 阶段交换协议版本号
+
+Response JSON: { "rv": 0, "data": {...} }
 ```
 
 支持的 PKCS#11 命令：
-- `C_GetSlotList` / `C_GetSlotInfo` / `C_GetTokenInfo` / `C_GetMechanismList`
-- `C_OpenSession` / `C_CloseSession` / `C_CloseAllSessions`
-- `C_Login` / `C_Logout`
+- `C_GetInfo` / `C_GetSlotList` / `C_GetSlotInfo` / `C_GetTokenInfo`
+- `C_GetMechanismList` / `C_GetMechanismInfo`
+- `C_OpenSession` / `C_CloseSession` / `C_CloseAllSessions` / `C_GetSessionInfo`
+- `C_Login` / `C_Logout` / `C_InitPIN` / `C_SetPIN`
 - `C_FindObjectsInit` / `C_FindObjects` / `C_FindObjectsFinal`
-- `C_GetAttributeValue`
+- `C_GetAttributeValue` / `C_CreateObject` / `C_DestroyObject`
 - `C_SignInit` / `C_Sign`
 - `C_DecryptInit` / `C_Decrypt`
 - `C_EncryptInit` / `C_Encrypt`
+- `C_GenerateKeyPair`
 
 ### Phase 2：Local Slot
 
@@ -135,13 +141,21 @@ Response: { "seq": 1, "rv": 0, "payload": {...} }
 私钥 DER 数据
 ```
 
-**支持的密钥类型**：rsa2048 / rsa4096 / ec256 / ec384 / ec521
+**支持的密钥类型**：
+- RSA: 1024 / 2048 / 4096 / 8192
+- EC: P-256 / P-384 / P-521 / Brainpool P-256r1 / P-384r1 / P-512r1
+- EdDSA: Ed25519 / X25519
+- 国密: SM2
 
-**支持的签名算法**：
-- RSA: PKCS1v15 (SHA256/384/512), PSS (SHA256)
+**支持的签名/摘要算法**：
+- RSA: PKCS1v15 (SHA1/256/384/512), PSS (SHA256/384/512)
 - ECDSA: SHA256 / SHA384 / SHA512 / 原始摘要
+- EdDSA: Ed25519 纯签名
+- 摘要: SHA-1 / SHA-256 / SHA-384 / SHA-512 / SHA3-256 / SHA3-384 / SHA3-512 / MD5 / SM3
 
-**支持的加密算法**：RSA-PKCS1v15, RSA-OAEP
+**支持的加密算法**：
+- 非对称: RSA-PKCS1v15 / RSA-OAEP
+- 对称: AES-128/256 (GCM/CBC) / ChaCha20-Poly1305 / SM4
 
 ### Phase 3：REST API
 
@@ -329,25 +343,34 @@ client-card/internal/card/cloud/
 
 | PKCS#11 函数 | IPC 命令 | 状态 |
 |-------------|---------|------|
-| `C_Initialize` | — (本地初始化) | ⬜ |
-| `C_GetSlotList` | `C_GetSlotList` | ⬜ |
-| `C_GetSlotInfo` | `C_GetSlotInfo` | ⬜ |
-| `C_GetTokenInfo` | `C_GetTokenInfo` | ⬜ |
-| `C_GetMechanismList` | `C_GetMechanismList` | ⬜ |
-| `C_OpenSession` | `C_OpenSession` | ⬜ |
-| `C_CloseSession` | `C_CloseSession` | ⬜ |
-| `C_Login` | `C_Login` | ⬜ |
-| `C_Logout` | `C_Logout` | ⬜ |
-| `C_FindObjectsInit` | `C_FindObjectsInit` | ⬜ |
-| `C_FindObjects` | `C_FindObjects` | ⬜ |
-| `C_FindObjectsFinal` | `C_FindObjectsFinal` | ⬜ |
-| `C_GetAttributeValue` | `C_GetAttributeValue` | ⬜ |
-| `C_SignInit` | `C_SignInit` | ⬜ |
-| `C_Sign` | `C_Sign` | ⬜ |
-| `C_DecryptInit` | `C_DecryptInit` | ⬜ |
-| `C_Decrypt` | `C_Decrypt` | ⬜ |
-| `C_EncryptInit` | `C_EncryptInit` | ⬜ |
-| `C_Encrypt` | `C_Encrypt` | ⬜ |
+| `C_Initialize` | Handshake (版本协商) | ✅ |
+| `C_GetInfo` | `CmdGetInfo` | ✅ |
+| `C_GetSlotList` | `CmdGetSlotList` | ✅ |
+| `C_GetSlotInfo` | `CmdGetSlotInfo` | ✅ |
+| `C_GetTokenInfo` | `CmdGetTokenInfo` | ✅ |
+| `C_GetMechanismList` | `CmdGetMechanismList` | ✅ |
+| `C_GetMechanismInfo` | `CmdGetMechanismInfo` | ✅ |
+| `C_OpenSession` | `CmdOpenSession` | ✅ |
+| `C_CloseSession` | `CmdCloseSession` | ✅ |
+| `C_CloseAllSessions` | `CmdCloseAllSessions` | ✅ |
+| `C_GetSessionInfo` | `CmdGetSessionInfo` | ✅ |
+| `C_Login` | `CmdLogin` | ✅ |
+| `C_Logout` | `CmdLogout` | ✅ |
+| `C_InitPIN` | `CmdInitPIN` | ✅ |
+| `C_SetPIN` | `CmdSetPIN` | ✅ |
+| `C_FindObjectsInit` | `CmdFindObjectsInit` | ✅ |
+| `C_FindObjects` | `CmdFindObjects` | ✅ |
+| `C_FindObjectsFinal` | `CmdFindObjectsFinal` | ✅ |
+| `C_GetAttributeValue` | `CmdGetAttributeValue` | ✅ |
+| `C_CreateObject` | `CmdCreateObject` | ✅ |
+| `C_DestroyObject` | `CmdDestroyObject` | ✅ |
+| `C_SignInit` | `CmdSignInit` | ✅ |
+| `C_Sign` | `CmdSign` | ✅ |
+| `C_DecryptInit` | `CmdDecryptInit` | ✅ |
+| `C_Decrypt` | `CmdDecrypt` | ✅ |
+| `C_EncryptInit` | `CmdEncryptInit` | ✅ |
+| `C_Encrypt` | `CmdEncrypt` | ✅ |
+| `C_GenerateKeyPair` | `CmdGenerateKeyPair` | ✅ |
 
 ---
 

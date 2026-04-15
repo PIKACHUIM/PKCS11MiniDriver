@@ -30,6 +30,7 @@
 #define IPC_MAX_PAYLOAD    (4 * 1024 * 1024)
 
 /* ---- 命令码（与 Go 侧 protocol.go 一致）---- */
+#define CMD_PING               0x0000u
 #define CMD_GET_INFO           0x0001u
 #define CMD_GET_SLOT_LIST      0x0002u
 #define CMD_GET_SLOT_INFO      0x0003u
@@ -63,6 +64,10 @@
 #define CMD_GENERATE_RANDOM    0x001Fu
 #define CMD_DIGEST_INIT        0x0020u
 #define CMD_DIGEST             0x0021u
+#define CMD_GET_SESSION_INFO   0x0022u
+#define CMD_INIT_PIN           0x0023u
+#define CMD_SET_PIN            0x0024u
+#define CMD_HANDSHAKE          0x00FFu
 
 /* ---- CK_RV 常用返回码 ---- */
 #define IPC_CKR_OK                    0x00000000u
@@ -149,5 +154,19 @@ void ipc_global_disconnect(void);
  * ipc_global_fd - 获取全局连接句柄。
  */
 ipc_fd_t ipc_global_fd(void);
+
+/* ---- 心跳与版本协商 ---- */
+
+/**
+ * ipc_send_ping - 发送心跳 Ping。
+ * 返回 0 成功，-1 失败。
+ */
+int ipc_send_ping(ipc_fd_t fd);
+
+/**
+ * ipc_check_heartbeat - 检查心跳，失败时尝试重连（指数退避）。
+ * 返回 0 连接正常，-1 彻底断开。
+ */
+int ipc_check_heartbeat(void);
 
 #endif /* IPC_CLIENT_H */

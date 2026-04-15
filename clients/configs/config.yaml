@@ -1,0 +1,46 @@
+# clients 配置文件
+
+# IPC 通信配置（与 pkcs11-mock 通信）
+ipc:
+  # Windows: \\.\pipe\clients
+  # macOS/Linux: /tmp/clients.sock
+  pipe_name: "clients"
+  # 请求超时（秒）
+  timeout: 30
+
+# REST API 配置（前端和管理接口）
+api:
+  # 监听地址，默认只绑定本地
+  host: "127.0.0.1"
+  # 默认端口 1026
+  port: 1026
+  # 是否启用 TLS（远程访问时建议开启）
+  tls_enabled: false
+  tls_cert: ""
+  tls_key: ""
+  # JWT 签名密钥（生产环境请修改）
+  jwt_secret: ""
+  # JWT 有效期（小时）
+  jwt_expire_hours: 24
+
+# 数据库配置
+database:
+  # SQLite 数据库文件路径
+  # 默认存储在用户数据目录
+  path: ""
+  # 连接池大小
+  max_open_conns: 5
+  max_idle_conns: 2
+
+# 日志配置
+log:
+  # debug / info / warn / error
+  level: "info"
+  # 日志文件路径，留空则输出到 stdout
+  file: ""
+
+# 系统托盘配置
+tray:
+  enabled: true
+  # 托盘图标路径
+  icon: ""

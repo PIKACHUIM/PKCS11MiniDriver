@@ -7,7 +7,7 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // 开发时代理 API 请求到 client-card
+      // 开发时代理 API 请求到 clients
       '/api': {
         target: 'http://localhost:1026',
         changeOrigin: true,

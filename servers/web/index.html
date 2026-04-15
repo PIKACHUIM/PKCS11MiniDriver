@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenCert Platform — 开源证书管理平台</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1a1a2e; background: #f8f9fa; }
+        .hero { background: linear-gradient(135deg, #0f3460 0%, #16213e 50%, #1a1a2e 100%); color: #fff; padding: 80px 20px; text-align: center; }
+        .hero h1 { font-size: 3rem; margin-bottom: 16px; letter-spacing: -1px; }
+        .hero h1 span { color: #e94560; }
+        .hero p { font-size: 1.25rem; opacity: 0.85; max-width: 700px; margin: 0 auto 32px; line-height: 1.6; }
+        .hero .btn-group { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+        .btn { display: inline-block; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 1rem; transition: transform 0.2s, box-shadow 0.2s; }
+        .btn-primary { background: #e94560; color: #fff; }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(233,69,96,0.3); }
+        .btn-outline { border: 2px solid rgba(255,255,255,0.5); color: #fff; }
+        .btn-outline:hover { border-color: #fff; transform: translateY(-2px); }
+        .features { max-width: 1100px; margin: -40px auto 60px; padding: 0 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; }
+        .card { background: #fff; border-radius: 12px; padding: 32px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); transition: transform 0.2s; }
+        .card:hover { transform: translateY(-4px); }
+        .card .icon { font-size: 2.5rem; margin-bottom: 16px; }
+        .card h3 { font-size: 1.25rem; margin-bottom: 8px; color: #0f3460; }
+        .card p { color: #666; line-height: 1.6; font-size: 0.95rem; }
+        .section { max-width: 1100px; margin: 0 auto 60px; padding: 0 20px; }
+        .section h2 { font-size: 2rem; text-align: center; margin-bottom: 40px; color: #0f3460; }
+        .cert-types { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+        .cert-type { background: #fff; border-radius: 8px; padding: 20px; text-align: center; border: 1px solid #eee; }
+        .cert-type h4 { color: #0f3460; margin: 8px 0 4px; }
+        .cert-type p { color: #888; font-size: 0.85rem; }
+        .arch { background: #16213e; color: #fff; padding: 60px 20px; text-align: center; }
+        .arch h2 { font-size: 2rem; margin-bottom: 16px; }
+        .arch p { opacity: 0.7; max-width: 600px; margin: 0 auto 32px; }
+        .arch pre { background: rgba(255,255,255,0.08); border-radius: 8px; padding: 24px; max-width: 600px; margin: 0 auto; text-align: left; font-size: 0.9rem; line-height: 1.8; overflow-x: auto; }
+        footer { background: #1a1a2e; color: rgba(255,255,255,0.5); text-align: center; padding: 24px; font-size: 0.85rem; }
+        footer a { color: #e94560; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <h1>🔐 Open<span>Cert</span> Platform</h1>
+        <p>开源的 CA + 智能卡 + X.509/GPG/SSH 证书管理平台，提供完整的证书生命周期管理、虚拟智能卡驱动和 PKCS#11 标准兼容接口。</p>
+        <div class="btn-group">
+            <a href="/api/health" class="btn btn-primary">API 状态</a>
+            <a href="https://github.com/globaltrusts/opencert" class="btn btn-outline">GitHub</a>
+        </div>
+    </div>
+
+    <div class="features">
+        <div class="card">
+            <div class="icon">🏛️</div>
+            <h3>CA 证书颁发</h3>
+            <p>完整的 CA 管理功能，支持根 CA 创建、中间 CA 签发、证书模板管理、CRL/OCSP 吊销服务和 ACME 自动化签发。</p>
+        </div>
+        <div class="card">
+            <div class="icon">💳</div>
+            <h3>虚拟智能卡</h3>
+            <p>三种安全等级的虚拟智能卡（TPM 高安全/本地中安全/密码低安全），兼容 PKCS#11 标准，可被系统和应用直接调用。</p>
+        </div>
+        <div class="card">
+            <div class="icon">🔑</div>
+            <h3>多类型凭据</h3>
+            <p>统一管理 X.509 证书、SSH 密钥、GPG 证书、TOTP/FIDO 认证、登录信息、安全笔记等多种安全凭据。</p>
+        </div>
+        <div class="card">
+            <div class="icon">☁️</div>
+            <h3>云端同步</h3>
+            <p>证书和密钥可安全存储在云端智能卡中，支持离线缓存、自动重连和端到端加密的私钥备份与恢复。</p>
+        </div>
+        <div class="card">
+            <div class="icon">🛡️</div>
+            <h3>安全架构</h3>
+            <p>AES-256-GCM 三层加密、Argon2id 密钥派生、TPM 硬件保护、JWT Token 轮换、RBAC 权限控制。</p>
+        </div>
+        <div class="card">
+            <div class="icon">💰</div>
+            <h3>支付与订单</h3>
+            <p>灵活的支付插件系统，支持多种支付渠道，完整的充值、订单、余额管理和退款审批工作流。</p>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>支持的证书类型</h2>
+        <div class="cert-types">
+            <div class="cert-type"><div style="font-size:2rem">📜</div><h4>SSL/TLS 证书</h4><p>DV / OV / EV</p></div>
+            <div class="cert-type"><div style="font-size:2rem">✍️</div><h4>代码签名</h4><p>软件发布签名</p></div>
+            <div class="cert-type"><div style="font-size:2rem">📧</div><h4>S/MIME 邮件</h4><p>邮件加密签名</p></div>
+            <div class="cert-type"><div style="font-size:2rem">🔗</div><h4>客户端证书</h4><p>双向 TLS 认证</p></div>
+            <div class="cert-type"><div style="font-size:2rem">🗝️</div><h4>SSH 密钥</h4><p>服务器登录认证</p></div>
+            <div class="cert-type"><div style="font-size:2rem">🔏</div><h4>GPG 证书</h4><p>文件/Git 签名</p></div>
+        </div>
+    </div>
+
+    <div class="arch">
+        <h2>系统架构</h2>
+        <p>三层架构设计，驱动层通过 IPC 与管理端通信，管理端通过 REST API 与云端平台交互。</p>
+        <pre>
+OpenCert Driver  (pkcs11-mock.dll/so)    — PKCS#11 标准驱动
+       ↕  IPC (Named Pipe / Unix Socket)
+OpenCert Manager (client-card + webpage) — 本地管理端
+       ↕  REST API (HTTPS)
+OpenCert Platform (server-card)          — 云端平台服务
+        </pre>
+    </div>
+
+    <footer>
+        <p>© 2024 OpenCert Project · <a href="https://github.com/globaltrusts/opencert">开源项目</a> · 基于 Go + React + C 构建</p>
+    </footer>
+</body>
+</html>

@@ -16,7 +16,7 @@ concurrency:
 
 env:
   GO_VERSION: "1.22"
-  APP_NAME: client-card
+  APP_NAME: clients
 
 jobs:
   # ================================================================
@@ -64,10 +64,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: client-card/go.sum
+          cache-dependency-path: clients/go.sum
 
       - name: Run tests
-        working-directory: client-card
+        working-directory: clients
         run: go test -v -race -count=1 -timeout=120s ./test/...
 
   # ================================================================
@@ -83,19 +83,19 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            asset_name: client-card-linux-amd64
+            asset_name: clients-linux-amd64
           - goos: linux
             goarch: arm64
-            asset_name: client-card-linux-arm64
+            asset_name: clients-linux-arm64
           - goos: darwin
             goarch: amd64
-            asset_name: client-card-darwin-amd64
+            asset_name: clients-darwin-amd64
           - goos: darwin
             goarch: arm64
-            asset_name: client-card-darwin-arm64
+            asset_name: clients-darwin-arm64
           - goos: windows
             goarch: amd64
-            asset_name: client-card-windows-amd64.exe
+            asset_name: clients-windows-amd64.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -103,10 +103,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache-dependency-path: client-card/go.sum
+          cache-dependency-path: clients/go.sum
 
       - name: Build binary
-        working-directory: client-card
+        working-directory: clients
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -119,14 +119,14 @@ jobs:
 
       - name: Compress (non-Windows)
         if: matrix.goos != 'windows'
-        working-directory: client-card
+        working-directory: clients
         run: |
           tar czf ${{ matrix.asset_name }}.tar.gz ${{ matrix.asset_name }}
           echo "ASSET_FILE=${{ matrix.asset_name }}.tar.gz" >> $GITHUB_ENV
 
       - name: Compress (Windows)
         if: matrix.goos == 'windows'
-        working-directory: client-card
+        working-directory: clients
         run: |
           zip ${{ matrix.asset_name }}.zip ${{ matrix.asset_name }}
           echo "ASSET_FILE=${{ matrix.asset_name }}.zip" >> $GITHUB_ENV
@@ -135,7 +135,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
-          path: client-card/${{ env.ASSET_FILE }}
+          path: clients/${{ env.ASSET_FILE }}
           retention-days: 7
 
   # ================================================================

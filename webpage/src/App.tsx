@@ -1,16 +1,33 @@
-import React, { Suspense, lazy } from 'react';
+import React, { Suspense, lazy, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { ConfigProvider, theme, Spin } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { useAppStore } from './store/appStore';
 import MainLayout from './layouts/MainLayout';
+import ErrorBoundary from './components/ErrorBoundary';
+import PrivateRoute from './components/PrivateRoute';
 
-// 懒加载页面
+// 公开页面
+const Home = lazy(() => import('./pages/Home'));
+const Login = lazy(() => import('./pages/Login'));
+
+// 受保护页面（懒加载）
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Users = lazy(() => import('./pages/Users'));
 const Cards = lazy(() => import('./pages/Cards'));
+const Certs = lazy(() => import('./pages/Certs'));
+const TOTP = lazy(() => import('./pages/TOTP'));
+const PKI = lazy(() => import('./pages/PKI'));
 const Logs = lazy(() => import('./pages/Logs'));
 const Settings = lazy(() => import('./pages/Settings'));
+const Profile = lazy(() => import('./pages/Profile'));
+// 新增页面
+const CA = lazy(() => import('./pages/CA'));
+const Templates = lazy(() => import('./pages/Templates'));
+const Payment = lazy(() => import('./pages/Payment'));
+const Identity = lazy(() => import('./pages/Identity'));
+const CertOrders = lazy(() => import('./pages/CertOrders'));
+const CTRecords = lazy(() => import('./pages/CTRecords'));
 
 const PageLoader = () => (
   <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}>
@@ -18,8 +35,20 @@ const PageLoader = () => (
   </div>
 );
 
+const S = ({ children }: { children: React.ReactNode }) => (
+  <Suspense fallback={<PageLoader />}>{children}</Suspense>
+);
+
 const App: React.FC = () => {
-  const { darkMode } = useAppStore();
+  const { darkMode, themeMode, setThemeMode } = useAppStore();
+
+  useEffect(() => {
+    if (themeMode !== 'system') return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const handler = () => setThemeMode('system');
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, [themeMode, setThemeMode]);
 
   return (
     <ConfigProvider
@@ -32,28 +61,43 @@ const App: React.FC = () => {
           fontFamily: "'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif",
         },
         components: {
-          Layout: {
-            siderBg: darkMode ? '#0d1117' : '#001529',
-          },
-          Menu: {
-            darkItemBg: 'transparent',
-            darkSubMenuItemBg: 'transparent',
-          },
+          Layout: { siderBg: darkMode ? '#0d1117' : '#001529' },
+          Menu: { darkItemBg: 'transparent', darkSubMenuItemBg: 'transparent' },
         },
       }}
     >
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<MainLayout />}>
-            <Route index element={<Navigate to="/dashboard" replace />} />
-            <Route path="dashboard" element={<Suspense fallback={<PageLoader />}><Dashboard /></Suspense>} />
-            <Route path="users" element={<Suspense fallback={<PageLoader />}><Users /></Suspense>} />
-            <Route path="cards" element={<Suspense fallback={<PageLoader />}><Cards /></Suspense>} />
-            <Route path="logs" element={<Suspense fallback={<PageLoader />}><Logs /></Suspense>} />
-            <Route path="settings" element={<Suspense fallback={<PageLoader />}><Settings /></Suspense>} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
+      <ErrorBoundary>
+        <BrowserRouter>
+          <Routes>
+            {/* 公开路由 */}
+            <Route path="/" element={<S><Home /></S>} />
+            <Route path="/login" element={<S><Login /></S>} />
+
+            {/* 受保护路由：包裹在 MainLayout 内 */}
+            <Route path="/" element={<PrivateRoute><MainLayout /></PrivateRoute>}>
+              <Route path="dashboard" element={<S><Dashboard /></S>} />
+              <Route path="users" element={<S><Users /></S>} />
+              <Route path="cards" element={<S><Cards /></S>} />
+              <Route path="certs" element={<S><Certs /></S>} />
+              <Route path="totp" element={<S><TOTP /></S>} />
+              <Route path="pki" element={<S><PKI /></S>} />
+              <Route path="logs" element={<S><Logs /></S>} />
+              <Route path="settings" element={<S><Settings /></S>} />
+              <Route path="profile" element={<S><Profile /></S>} />
+              {/* 新增页面 */}
+              <Route path="ca" element={<S><CA /></S>} />
+              <Route path="templates" element={<S><Templates /></S>} />
+              <Route path="payment" element={<S><Payment /></S>} />
+              <Route path="identity" element={<S><Identity /></S>} />
+              <Route path="cert-orders" element={<S><CertOrders /></S>} />
+              <Route path="ct-records" element={<S><CTRecords /></S>} />
+            </Route>
+
+            {/* 兜底重定向 */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
+      </ErrorBoundary>
     </ConfigProvider>
   );
 };

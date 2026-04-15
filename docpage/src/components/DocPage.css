@@ -1,0 +1,313 @@
+/* ===== 文档页面 ===== */
+.doc-page {
+  min-height: calc(100vh - var(--header-height));
+  display: flex;
+  flex-direction: column;
+}
+
+.doc-header {
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border);
+  padding: 2.5rem 2rem 2rem;
+  position: relative;
+  overflow: hidden;
+}
+
+.doc-header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(99, 179, 237, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(99, 179, 237, 0.03) 1px, transparent 1px);
+  background-size: 30px 30px;
+  pointer-events: none;
+}
+
+.doc-header-inner {
+  max-width: 900px;
+  position: relative;
+}
+
+.doc-title {
+  font-size: clamp(1.75rem, 4vw, 2.5rem);
+  color: var(--color-text);
+  margin: 0.5rem 0 0.75rem;
+  letter-spacing: -0.03em;
+}
+
+.doc-subtitle {
+  color: var(--color-text-secondary);
+  font-size: 1rem;
+  line-height: 1.7;
+  max-width: 600px;
+}
+
+.doc-body {
+  flex: 1;
+  padding: 2.5rem 2rem;
+}
+
+.doc-content {
+  max-width: 900px;
+}
+
+/* ===== 文档内容排版 ===== */
+.doc-content h2 {
+  font-size: 1.35rem;
+  color: var(--color-text);
+  margin: 2.5rem 0 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.doc-content h2:first-child {
+  margin-top: 0;
+}
+
+.doc-content h3 {
+  font-size: 1.05rem;
+  color: var(--color-primary);
+  margin: 1.75rem 0 0.75rem;
+}
+
+.doc-content p {
+  color: var(--color-text-secondary);
+  line-height: 1.8;
+  margin-bottom: 1rem;
+}
+
+.doc-content ul, .doc-content ol {
+  color: var(--color-text-secondary);
+  padding-left: 1.5rem;
+  margin-bottom: 1rem;
+  line-height: 1.8;
+}
+
+.doc-content li {
+  margin-bottom: 0.25rem;
+}
+
+.doc-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.25rem 0;
+  font-size: 0.875rem;
+}
+
+.doc-content th {
+  background: var(--color-bg-card);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 10px 14px;
+  text-align: left;
+  border: 1px solid var(--color-border);
+}
+
+.doc-content td {
+  padding: 9px 14px;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  vertical-align: top;
+}
+
+.doc-content tr:hover td {
+  background: var(--color-bg-card);
+}
+
+/* ===== 信息框 ===== */
+.callout {
+  display: flex;
+  gap: 12px;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius-md);
+  margin: 1.25rem 0;
+  border-left: 3px solid;
+}
+
+.callout-info {
+  background: rgba(99, 179, 237, 0.08);
+  border-color: var(--color-primary);
+}
+
+.callout-warning {
+  background: rgba(246, 173, 85, 0.08);
+  border-color: var(--color-warning);
+}
+
+.callout-success {
+  background: rgba(104, 211, 145, 0.08);
+  border-color: var(--color-success);
+}
+
+.callout-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.callout-body {
+  flex: 1;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  line-height: 1.7;
+}
+
+.callout-body strong {
+  color: var(--color-text);
+  display: block;
+  margin-bottom: 4px;
+}
+
+/* ===== 卡片网格 ===== */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+  margin: 1.25rem 0;
+}
+
+.info-card {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 1.25rem;
+  transition: all 0.2s;
+}
+
+.info-card:hover {
+  border-color: var(--color-border-hover);
+  background: var(--color-bg-card-hover);
+}
+
+.info-card-title {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--color-primary);
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.info-card-body {
+  font-size: 0.825rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
+/* ===== 步骤 ===== */
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 1.25rem 0;
+}
+
+.step {
+  display: flex;
+  gap: 1rem;
+  position: relative;
+}
+
+.step:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: 15px;
+  top: 36px;
+  bottom: -8px;
+  width: 2px;
+  background: var(--color-border);
+}
+
+.step-num {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--color-primary-dim);
+  border: 2px solid var(--color-primary);
+  color: var(--color-primary);
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.step-body {
+  flex: 1;
+  padding-bottom: 1.5rem;
+}
+
+.step-title {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--color-text);
+  margin-bottom: 0.5rem;
+}
+
+.step-desc {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
+/* ===== API 端点 ===== */
+.api-endpoint {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  margin: 1rem 0;
+  overflow: hidden;
+}
+
+.api-endpoint-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: rgba(255,255,255,0.02);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.method-badge {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.05em;
+}
+
+.method-get    { background: rgba(104, 211, 145, 0.2); color: #68d391; }
+.method-post   { background: rgba(99, 179, 237, 0.2);  color: #63b3ed; }
+.method-put    { background: rgba(246, 173, 85, 0.2);  color: #f6ad55; }
+.method-delete { background: rgba(252, 129, 129, 0.2); color: #fc8181; }
+
+.api-path {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  color: var(--color-text);
+}
+
+.api-desc {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  margin-left: auto;
+}
+
+.api-endpoint-body {
+  padding: 1rem 1.25rem;
+}

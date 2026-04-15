@@ -1,15 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { Row, Col, Card, Statistic, Badge, Table, Tag, Typography, Space, Spin, Alert } from 'antd';
 import {
-  CreditCardOutlined,
-  UserOutlined,
-  SafetyCertificateOutlined,
-  ApiOutlined,
-  CheckCircleOutlined,
-  CloseCircleOutlined,
+  CreditCardOutlined, UserOutlined, SafetyCertificateOutlined, ApiOutlined,
+  CheckCircleOutlined, CloseCircleOutlined, WalletOutlined, ApartmentOutlined,
+  ClockCircleOutlined, AuditOutlined,
 } from '@ant-design/icons';
 import { useAppStore } from '../../store/appStore';
-import { getUsers, getCards, getLogs } from '../../api';
+import { useAuthStore } from '../../store/auth';
+import { getUsers, getCards, getLogs, getBalance, listCAs, listCertApplications } from '../../api';
 import type { Log } from '../../types';
 import dayjs from 'dayjs';
 
@@ -17,27 +15,40 @@ const { Title, Text } = Typography;
 
 const Dashboard: React.FC = () => {
   const { connected, slots, slotsLoading, darkMode } = useAppStore();
+  const { role } = useAuthStore();
   const [userCount, setUserCount] = useState(0);
   const [cardCount, setCardCount] = useState(0);
   const [recentLogs, setRecentLogs] = useState<Log[]>([]);
   const [loading, setLoading] = useState(true);
+  const [balance, setBalance] = useState<number | null>(null);
+  const [caCount, setCACount] = useState(0);
+  const [pendingApps, setPendingApps] = useState(0);
 
   useEffect(() => {
     if (!connected) return;
     setLoading(true);
-    Promise.all([
+    const tasks: Promise<any>[] = [
       getUsers({ page: 1, page_size: 1 }),
       getCards({ page: 1, page_size: 1 }),
       getLogs({ page: 1, page_size: 8 }),
-    ])
-      .then(([users, cards, logs]) => {
+      getBalance().catch(() => null),
+    ];
+    if (role === 'admin') {
+      tasks.push(listCAs({ page: 1, page_size: 1 }).catch(() => null));
+      tasks.push(listCertApplications({ page: 1, page_size: 1, status: 'pending' }).catch(() => null));
+    }
+    Promise.all(tasks)
+      .then(([users, cards, logs, bal, cas, apps]) => {
         setUserCount(users?.total ?? 0);
         setCardCount(cards?.total ?? 0);
         setRecentLogs(logs?.items ?? []);
+        if (bal) setBalance(bal.available);
+        if (cas) setCACount(cas.total ?? 0);
+        if (apps) setPendingApps(apps.total ?? 0);
       })
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, [connected]);
+  }, [connected, role]);
 
   const cardStyle = {
     background: darkMode ? '#161b22' : '#fff',
@@ -47,67 +58,39 @@ const Dashboard: React.FC = () => {
 
   const logColumns = [
     {
-      title: '时间',
-      dataIndex: 'created_at',
-      width: 160,
-      render: (v: string) => (
-        <Text style={{ fontSize: 12, color: darkMode ? '#8b949e' : '#999' }}>
-          {dayjs(v).format('MM-DD HH:mm:ss')}
-        </Text>
-      ),
+      title: '时间', dataIndex: 'created_at', width: 160,
+      render: (v: string) => <Text style={{ fontSize: 12, color: darkMode ? '#8b949e' : '#999' }}>{dayjs(v).format('MM-DD HH:mm:ss')}</Text>,
     },
     {
-      title: '级别',
-      dataIndex: 'level',
-      width: 70,
-      render: (v: string) => (
-        <Tag color={v === 'error' ? 'red' : v === 'warn' ? 'orange' : 'blue'} style={{ fontSize: 11 }}>
-          {v?.toUpperCase()}
-        </Tag>
-      ),
+      title: '级别', dataIndex: 'level', width: 70,
+      render: (v: string) => <Tag color={v === 'error' ? 'red' : v === 'warn' ? 'orange' : 'blue'} style={{ fontSize: 11 }}>{v?.toUpperCase()}</Tag>,
     },
+    { title: '标题', dataIndex: 'title', render: (v: string) => <Text style={{ fontSize: 13 }}>{v}</Text> },
     {
-      title: '标题',
-      dataIndex: 'title',
-      render: (v: string) => <Text style={{ fontSize: 13 }}>{v}</Text>,
-    },
-    {
-      title: '类型',
-      dataIndex: 'slot_type',
-      width: 80,
-      render: (v: string) => (
-        <Tag color={v === 'cloud' ? 'purple' : v === 'tpm2' ? 'cyan' : 'green'} style={{ fontSize: 11 }}>
-          {v || 'local'}
-        </Tag>
-      ),
+      title: '类型', dataIndex: 'slot_type', width: 80,
+      render: (v: string) => <Tag color={v === 'cloud' ? 'purple' : v === 'tpm2' ? 'cyan' : 'green'} style={{ fontSize: 11 }}>{v || 'local'}</Tag>,
     },
   ];
 
   return (
-    <div style={{ padding: '24px' }}>
-      <Title level={4} style={{ marginBottom: 24, color: darkMode ? '#c9d1d9' : undefined }}>
-        系统概览
-      </Title>
+    <div>
+      <Title level={4} style={{ marginBottom: 24, color: darkMode ? '#c9d1d9' : undefined }}>系统概览</Title>
 
-      {!connected && (
-        <Alert
-          message="未连接到 client-card 服务"
-          description="请确保 client-card 服务已启动（默认端口 1026）"
-          type="warning"
-          showIcon
-          style={{ marginBottom: 24 }}
-        />
-      )}
+      <Alert
+        message={connected ? `已连接服务 v${useAppStore.getState().serverVersion}` : '未连接到服务'}
+        type={connected ? 'success' : 'warning'}
+        showIcon
+        style={{ marginBottom: 16 }}
+      />
 
       <Spin spinning={loading}>
-        {/* 统计卡片 */}
         <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
           <Col xs={24} sm={12} lg={6}>
             <Card style={cardStyle} bodyStyle={{ padding: '20px 24px' }}>
               <Statistic
-                title={<Text style={{ color: darkMode ? '#8b949e' : '#666' }}>用户总数</Text>}
-                value={userCount}
-                prefix={<UserOutlined style={{ color: '#1677ff' }} />}
+                title={<Text style={{ color: darkMode ? '#8b949e' : '#666' }}>我的卡片</Text>}
+                value={cardCount}
+                prefix={<CreditCardOutlined style={{ color: '#1677ff' }} />}
                 valueStyle={{ color: darkMode ? '#c9d1d9' : undefined }}
               />
             </Card>
@@ -115,9 +98,10 @@ const Dashboard: React.FC = () => {
           <Col xs={24} sm={12} lg={6}>
             <Card style={cardStyle} bodyStyle={{ padding: '20px 24px' }}>
               <Statistic
-                title={<Text style={{ color: darkMode ? '#8b949e' : '#666' }}>卡片总数</Text>}
-                value={cardCount}
-                prefix={<CreditCardOutlined style={{ color: '#52c41a' }} />}
+                title={<Text style={{ color: darkMode ? '#8b949e' : '#666' }}>账户余额</Text>}
+                value={balance !== null ? (balance / 100).toFixed(2) : '—'}
+                prefix={<WalletOutlined style={{ color: '#52c41a' }} />}
+                suffix="元"
                 valueStyle={{ color: darkMode ? '#c9d1d9' : undefined }}
               />
             </Card>
@@ -138,27 +122,62 @@ const Dashboard: React.FC = () => {
               <Statistic
                 title={<Text style={{ color: darkMode ? '#8b949e' : '#666' }}>服务状态</Text>}
                 value={connected ? '在线' : '离线'}
-                prefix={
-                  connected
-                    ? <CheckCircleOutlined style={{ color: '#52c41a' }} />
-                    : <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
-                }
+                prefix={connected ? <CheckCircleOutlined style={{ color: '#52c41a' }} /> : <CloseCircleOutlined style={{ color: '#ff4d4f' }} />}
                 valueStyle={{ color: connected ? '#52c41a' : '#ff4d4f' }}
               />
             </Card>
           </Col>
         </Row>
 
+        {role === 'admin' && (
+          <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+            <Col xs={24} sm={12} lg={6}>
+              <Card style={{ ...cardStyle, borderColor: '#1677ff33' }} bodyStyle={{ padding: '20px 24px' }}>
+                <Statistic
+                  title={<Text style={{ color: darkMode ? '#8b949e' : '#666' }}>平台用户总数</Text>}
+                  value={userCount}
+                  prefix={<UserOutlined style={{ color: '#1677ff' }} />}
+                  valueStyle={{ color: darkMode ? '#c9d1d9' : undefined }}
+                />
+              </Card>
+            </Col>
+            <Col xs={24} sm={12} lg={6}>
+              <Card style={{ ...cardStyle, borderColor: '#52c41a33' }} bodyStyle={{ padding: '20px 24px' }}>
+                <Statistic
+                  title={<Text style={{ color: darkMode ? '#8b949e' : '#666' }}>平台 CA 数量</Text>}
+                  value={caCount}
+                  prefix={<ApartmentOutlined style={{ color: '#52c41a' }} />}
+                  valueStyle={{ color: darkMode ? '#c9d1d9' : undefined }}
+                />
+              </Card>
+            </Col>
+            <Col xs={24} sm={12} lg={6}>
+              <Card style={{ ...cardStyle, borderColor: '#fa8c1633' }} bodyStyle={{ padding: '20px 24px' }}>
+                <Statistic
+                  title={<Text style={{ color: darkMode ? '#8b949e' : '#666' }}>待审批申请</Text>}
+                  value={pendingApps}
+                  prefix={<AuditOutlined style={{ color: '#fa8c16' }} />}
+                  valueStyle={{ color: pendingApps > 0 ? '#fa8c16' : (darkMode ? '#c9d1d9' : undefined) }}
+                />
+              </Card>
+            </Col>
+            <Col xs={24} sm={12} lg={6}>
+              <Card style={{ ...cardStyle, borderColor: '#722ed133' }} bodyStyle={{ padding: '20px 24px' }}>
+                <Statistic
+                  title={<Text style={{ color: darkMode ? '#8b949e' : '#666' }}>TOTP 条目</Text>}
+                  value="—"
+                  prefix={<ClockCircleOutlined style={{ color: '#722ed1' }} />}
+                  valueStyle={{ color: darkMode ? '#c9d1d9' : undefined }}
+                />
+              </Card>
+            </Col>
+          </Row>
+        )}
+
         <Row gutter={[16, 16]}>
-          {/* Slot 状态 */}
           <Col xs={24} lg={10}>
             <Card
-              title={
-                <Space>
-                  <ApiOutlined />
-                  <span>Slot 状态</span>
-                </Space>
-              }
+              title={<Space><ApiOutlined /><span>Slot 状态</span></Space>}
               style={cardStyle}
               headStyle={{ borderBottom: darkMode ? '1px solid #21262d' : undefined }}
               loading={slotsLoading}
@@ -168,26 +187,17 @@ const Dashboard: React.FC = () => {
               ) : (
                 <Space direction="vertical" style={{ width: '100%' }}>
                   {slots.map((slot) => (
-                    <div
-                      key={slot.slot_id}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        padding: '10px 12px',
-                        background: darkMode ? '#0d1117' : '#fafafa',
-                        borderRadius: 8,
-                        border: darkMode ? '1px solid #21262d' : '1px solid #f0f0f0',
-                      }}
-                    >
+                    <div key={slot.slot_id} style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      padding: '10px 12px',
+                      background: darkMode ? '#0d1117' : '#fafafa',
+                      borderRadius: 8,
+                      border: darkMode ? '1px solid #21262d' : '1px solid #f0f0f0',
+                    }}>
                       <Space>
                         <Badge status={slot.token_present ? 'success' : 'default'} />
-                        <Text style={{ fontSize: 13, color: darkMode ? '#c9d1d9' : undefined }}>
-                          Slot #{slot.slot_id}
-                        </Text>
-                        <Text style={{ fontSize: 12, color: darkMode ? '#8b949e' : '#999' }}>
-                          {slot.description}
-                        </Text>
+                        <Text style={{ fontSize: 13, color: darkMode ? '#c9d1d9' : undefined }}>Slot #{slot.slot_id}</Text>
+                        <Text style={{ fontSize: 12, color: darkMode ? '#8b949e' : '#999' }}>{slot.description}</Text>
                       </Space>
                       <Tag color={slot.token_present ? 'success' : 'default'} style={{ fontSize: 11 }}>
                         {slot.token_present ? '已就绪' : '未就绪'}
@@ -198,26 +208,15 @@ const Dashboard: React.FC = () => {
               )}
             </Card>
           </Col>
-
-          {/* 最近日志 */}
           <Col xs={24} lg={14}>
             <Card
-              title={
-                <Space>
-                  <SafetyCertificateOutlined />
-                  <span>最近操作日志</span>
-                </Space>
-              }
+              title={<Space><SafetyCertificateOutlined /><span>最近操作日志</span></Space>}
               style={cardStyle}
               headStyle={{ borderBottom: darkMode ? '1px solid #21262d' : undefined }}
             >
               <Table
-                dataSource={recentLogs}
-                columns={logColumns}
-                rowKey="uuid"
-                pagination={false}
-                size="small"
-                style={{ background: 'transparent' }}
+                dataSource={recentLogs} columns={logColumns} rowKey="uuid"
+                pagination={false} size="small" style={{ background: 'transparent' }}
               />
             </Card>
           </Col>

@@ -6,12 +6,13 @@ import {
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, UserOutlined, ReloadOutlined,
 } from '@ant-design/icons';
-import { getUsers, createUser, updateUser, deleteUser } from '../../api';
+import { getUsers, createUser, updateUser, deleteUser, updateUserRole, toggleUserEnabled } from '../../api';
 import type { User, CreateUserRequest } from '../../types';
 import { useAppStore } from '../../store/appStore';
 import dayjs from 'dayjs';
 
 const { Title, Text } = Typography;
+const { Option } = Select;
 
 const Users: React.FC = () => {
   const { darkMode } = useAppStore();
@@ -79,6 +80,26 @@ const Users: React.FC = () => {
     }
   };
 
+  const handleRoleChange = async (uuid: string, role: 'admin' | 'user' | 'readonly') => {
+    try {
+      await updateUserRole(uuid, role);
+      message.success('角色已更新');
+      load();
+    } catch (e: any) {
+      message.error(e.message);
+    }
+  };
+
+  const handleToggleEnabled = async (uuid: string, enabled: boolean) => {
+    try {
+      await toggleUserEnabled(uuid, enabled);
+      message.success(enabled ? '账号已启用' : '账号已禁用');
+      load();
+    } catch (e: any) {
+      message.error(e.message);
+    }
+  };
+
   const cardStyle = {
     background: darkMode ? '#161b22' : '#fff',
     border: darkMode ? '1px solid #21262d' : '1px solid #f0f0f0',
@@ -102,11 +123,34 @@ const Users: React.FC = () => {
       render: (v: string) => <Text style={{ color: darkMode ? '#8b949e' : '#666' }}>{v || '-'}</Text>,
     },
     {
-      title: '类型',
+      title: '角色',
       dataIndex: 'user_type',
-      width: 100,
-      render: (v: string) => (
-        <Tag color={v === 'admin' ? 'gold' : 'blue'}>{v || 'user'}</Tag>
+      width: 140,
+      render: (v: string, record: User) => (
+        <Select
+          size="small"
+          value={v || 'user'}
+          style={{ width: 120 }}
+          onChange={(role) => handleRoleChange(record.uuid, role as 'admin' | 'user' | 'readonly')}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <Option value="admin"><Tag color="gold" style={{ margin: 0 }}>管理员</Tag></Option>
+          <Option value="user"><Tag color="blue" style={{ margin: 0 }}>普通用户</Tag></Option>
+          <Option value="readonly"><Tag color="default" style={{ margin: 0 }}>只读</Tag></Option>
+        </Select>
+      ),
+    },
+    {
+      title: '启用状态',
+      dataIndex: 'enabled',
+      width: 90,
+      render: (v: boolean, record: User) => (
+        <Switch
+          size="small"
+          checked={v}
+          onChange={(checked) => handleToggleEnabled(record.uuid, checked)}
+          onClick={(_, e) => e.stopPropagation()}
+        />
       ),
     },
     {
@@ -114,14 +158,6 @@ const Users: React.FC = () => {
       dataIndex: 'cloud_url',
       render: (v: string) => (
         <Text style={{ fontSize: 12, color: darkMode ? '#8b949e' : '#999' }}>{v || '-'}</Text>
-      ),
-    },
-    {
-      title: '状态',
-      dataIndex: 'enabled',
-      width: 80,
-      render: (v: boolean) => (
-        <Tag color={v ? 'success' : 'default'}>{v ? '启用' : '禁用'}</Tag>
       ),
     },
     {
@@ -136,14 +172,11 @@ const Users: React.FC = () => {
     },
     {
       title: '操作',
-      width: 120,
+      width: 100,
       render: (_: any, record: User) => (
         <Space>
           <Tooltip title="编辑">
-            <Button
-              type="text" size="small" icon={<EditOutlined />}
-              onClick={() => handleEdit(record)}
-            />
+            <Button type="text" size="small" icon={<EditOutlined />} onClick={() => handleEdit(record)} />
           </Tooltip>
           <Popconfirm
             title="确认删除此用户？"
@@ -160,11 +193,9 @@ const Users: React.FC = () => {
   ];
 
   return (
-    <div style={{ padding: 24 }}>
+    <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <Title level={4} style={{ margin: 0, color: darkMode ? '#c9d1d9' : undefined }}>
-          用户管理
-        </Title>
+        <Title level={4} style={{ margin: 0, color: darkMode ? '#c9d1d9' : undefined }}>用户管理</Title>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={() => load()}>刷新</Button>
           <Button
@@ -178,14 +209,9 @@ const Users: React.FC = () => {
 
       <Card style={cardStyle} bodyStyle={{ padding: 0 }}>
         <Table
-          dataSource={users}
-          columns={columns}
-          rowKey="uuid"
-          loading={loading}
+          dataSource={users} columns={columns} rowKey="uuid" loading={loading}
           pagination={{
-            current: page,
-            total,
-            pageSize: 10,
+            current: page, total, pageSize: 10,
             onChange: (p) => { setPage(p); load(p); },
             showTotal: (t) => `共 ${t} 条`,
           }}
@@ -193,15 +219,12 @@ const Users: React.FC = () => {
         />
       </Card>
 
-      {/* 新建/编辑弹窗 */}
       <Modal
         title={editUser ? '编辑用户' : '新建用户'}
         open={modalOpen}
         onOk={handleSubmit}
         onCancel={() => { setModalOpen(false); form.resetFields(); setEditUser(null); }}
-        okText={editUser ? '保存' : '创建'}
-        cancelText="取消"
-        width={480}
+        okText={editUser ? '保存' : '创建'} cancelText="取消" width={480}
       >
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item name="display_name" label="显示名称" rules={[{ required: true, message: '请输入显示名称' }]}>
@@ -211,7 +234,11 @@ const Users: React.FC = () => {
             <Input placeholder="user@example.com" />
           </Form.Item>
           <Form.Item name="user_type" label="用户类型" initialValue="user">
-            <Select options={[{ value: 'user', label: '普通用户' }, { value: 'admin', label: '管理员' }]} />
+            <Select options={[
+              { value: 'user', label: '普通用户' },
+              { value: 'admin', label: '管理员' },
+              { value: 'readonly', label: '只读用户' },
+            ]} />
           </Form.Item>
           {!editUser && (
             <Form.Item name="password" label="密码" rules={[{ required: true, message: '请输入密码' }]}>
