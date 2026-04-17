@@ -2,28 +2,28 @@ import DocPage from '../components/DocPage'
 
 const serverModules = [
   { icon: '👤', title: '用户管理', desc: '注册/登录/TOTP 双因素认证、个人信息管理、公钥对管理、RBAC 角色权限' },
-  { icon: '💳', title: '智能卡存储域', desc: '本地数据库、TPM2 硬件、HSM 硬件三种存储区域，支持自定义驱动' },
-  { icon: '🃏', title: '云端智能卡', desc: '虚拟智能卡管理，支持多用户权限、PIN/PUK/Admin Key 三级密码保护' },
+  { icon: '💳', title: '卡存储域', desc: '本地数据库、TPM2 硬件、HSM 硬件三种存储区域，支持自定义驱动' },
+  { icon: '🃏', title: '云智能卡', desc: '虚拟智能卡管理，支持多用户权限、PIN/PUK/Admin Key 三级密码保护' },
   { icon: '📜', title: '证书管理', desc: 'X.509/GPG/SSH 证书全生命周期，颁发/吊销/续期/分配，关联订单与存储策略' },
   { icon: '🏛️', title: 'CA 管理', desc: '多级 CA 链、导入/颁发 CA、证书链管理、吊销列表管理' },
-  { icon: '📋', title: '证书颁发模板', desc: '颁发模板、主体模板、扩展信息模板、密钥用途模板、证书拓展模板、密钥存储类型模板' },
-  { icon: '📝', title: '证书申请模板', desc: '面向用户的申请配置，指定 CA/有效期/密钥算法，支持审批流程和续期' },
+  { icon: '📋', title: '颁发模板', desc: '颁发模板、主体模板、扩展信息模板、密钥用途模板、证书拓展模板、密钥存储类型模板' },
+  { icon: '📝', title: '申请模板', desc: '面向用户的申请配置，指定 CA/有效期/密钥算法，支持审批流程和续期' },
   { icon: '🔍', title: '主体/扩展验证', desc: '域名 TXT/HTTP 验证、邮箱验证码验证、IP 验证，存储验证时间判断有效性' },
   { icon: '🤖', title: 'ACME 服务', desc: '兼容 RFC 8555，支持多实例（/acme/<路径>），不同 CA 和证书颁发模板配置' },
   { icon: '🔑', title: 'OID 管理', desc: '自定义 OID，支持扩展密钥用途、证书主体字段、EV 声明、ASN.1 扩展字段' },
   { icon: '🚫', title: '吊销服务', desc: 'CRL/OCSP/CAIssuer 服务，按 CA 配置，支持自定义路径和 CRL 定时自动更新' },
   { icon: '📊', title: 'CT 透明度', desc: '证书提交 CT 日志，支持 CT 查询和列表管理，密码认证才能提交' },
   { icon: '🛒', title: '订单与支付', desc: '证书购买、订单管理、证书申请审批、多支付插件、用户充值、退款管理' },
-  { icon: '🔐', title: 'TOTP 验证器', desc: '内置 TOTP/HOTP 验证器，存储和查看验证码，支持标准 TOTP URI 格式' },
+  { icon: '🔐', title: 'TOTP验证', desc: '内置 TOTP/HOTP 验证器，存储和查看验证码，支持标准 TOTP URI 格式' },
   { icon: '🌐', title: '门户首页', desc: '面向公众的展示页面，项目功能介绍、证书产品列表、安全特性展示' },
 ]
 
 const clientModules = [
   { icon: '👤', title: '用户管理', desc: '本地用户（bcrypt 密码）和云端用户（JWT Token）两种类型，支持 PIN 码快速解锁' },
-  { icon: '💳', title: '智能卡管理', desc: 'Local/TPM2/Cloud 三种卡槽 CRUD，PIN/PUK/Admin Key 管理，多用户权限共享' },
+  { icon: '💳', title: '卡片管理', desc: 'Local/TPM2/Cloud 三种卡槽 CRUD，PIN/PUK/Admin Key 管理，多用户权限共享' },
   { icon: '📜', title: '证书管理', desc: '导入（PKCS12/PEM/私钥+证书/纯证书自动匹配私钥）、导出、删除、查看详情' },
   { icon: '🔧', title: 'PKI 工具', desc: 'CSR 生成与管理、本地 CA 管理、证书签发、自签名证书、证书格式转换' },
-  { icon: '🔐', title: 'TOTP 管理', desc: '添加 TOTP/HOTP 条目，实时显示验证码和倒计时，支持标准 URI 格式导入' },
+  { icon: '🔐', title: 'TOTP管理', desc: '添加 TOTP/HOTP 条目，实时显示验证码和倒计时，支持标准 URI 格式导入' },
   { icon: '☁️', title: '云端同步', desc: '云端证书下发到本地/智能卡，自动/手动同步，通过 pkcs11-mock 注册到系统' },
 ]
 
