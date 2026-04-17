@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -184,16 +185,18 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 
 // IssueCertRequest 是签发证书请求体。
 type IssueCertRequest struct {
-	KeyType     string   `json:"key_type"`
-	ValidDays   int      `json:"valid_days"`
-	CommonName  string   `json:"common_name"`
-	Org         string   `json:"organization"`
-	Country     string   `json:"country"`
-	IsCA        bool     `json:"is_ca"`
-	PathLen     int      `json:"path_len"`
-	DNSNames    []string `json:"dns_names"`
-	IPAddresses []string `json:"ip_addresses"`
-	EmailAddrs  []string `json:"email_addresses"`
+	KeyType          string   `json:"key_type"`
+	ValidDays        int      `json:"valid_days"`
+	CommonName       string   `json:"common_name"`
+	Org              string   `json:"organization"`
+	Country          string   `json:"country"`
+	IsCA             bool     `json:"is_ca"`
+	PathLen          int      `json:"path_len"`
+	DNSNames         []string `json:"dns_names"`
+	IPAddresses      []string `json:"ip_addresses"`
+	EmailAddrs       []string `json:"email_addresses"`
+	CardUUID         string   `json:"card_uuid"`          // 签发后存入的卡片 UUID（可选）
+	IssuanceTmplUUID string   `json:"issuance_tmpl_uuid"` // 颁发模板 UUID（可选）
 }
 
 func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
@@ -232,17 +235,18 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	issueReq := &ca.IssueRequest{
-		CAUUID:      caUUID,
-		Subject:     subject,
-		KeyType:     req.KeyType,
-		ValidDays:   req.ValidDays,
-		IsCA:        req.IsCA,
-		PathLen:     req.PathLen,
-		KeyUsage:    keyUsage,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		DNSNames:    req.DNSNames,
-		IPAddresses: ips,
-		EmailAddrs:  req.EmailAddrs,
+		CAUUID:           caUUID,
+		Subject:          subject,
+		KeyType:          req.KeyType,
+		ValidDays:        req.ValidDays,
+		IsCA:             req.IsCA,
+		PathLen:          req.PathLen,
+		KeyUsage:         keyUsage,
+		ExtKeyUsage:      []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		DNSNames:         req.DNSNames,
+		IPAddresses:      ips,
+		EmailAddrs:       req.EmailAddrs,
+		IssuanceTmplUUID: req.IssuanceTmplUUID,
 	}
 
 	resp, err := s.caSvc.IssueCert(r.Context(), issueReq)
@@ -252,6 +256,45 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := claimsFromCtx(r.Context())
+
+	// 如果指定了卡片 UUID，将证书存入卡片
+	var certUUID string
+	if req.CardUUID != "" {
+		certRepo := storage.NewCertRepo(s.db)
+		cert := &storage.Certificate{
+			CardUUID:         req.CardUUID,
+			UserUUID:         claims.UserUUID,
+			CertType:         "x509",
+			KeyType:          req.KeyType,
+			CertContent:      []byte(resp.CertPEM),
+			PrivateData:      resp.PrivateEnc,
+			CAUUID:           caUUID,
+			SerialNumber:     resp.SerialNumber,
+			SerialHex:        resp.SerialNumber,
+			SubjectDN:        resp.SubjectDN,
+			IssuerDN:         resp.IssuerDN,
+			NotBefore:        &resp.NotBefore,
+			NotAfter:         &resp.NotAfter,
+			IssuanceTmplUUID: req.IssuanceTmplUUID,
+			RevocationStatus: "active",
+		}
+		if err := certRepo.Create(r.Context(), cert); err != nil {
+			writeError(w, http.StatusInternalServerError, "保存证书失败: "+err.Error())
+			return
+		}
+		certUUID = cert.UUID
+	}
+
+	// 写入审计日志
+	s.auditLogRepo.Create(r.Context(), &storage.AuditLog{ //nolint:errcheck
+		UserUUID:     claims.UserUUID,
+		Action:       "issue_cert",
+		ResourceType: "certificate",
+		ResourceUUID: certUUID,
+		Detail:       fmt.Sprintf(`{"ca_uuid":"%s","cn":"%s","serial":"%s"}`, caUUID, req.CommonName, resp.SerialNumber),
+		IPAddress:    r.RemoteAddr,
+	})
+
 	s.logRepo.Create(r.Context(), &storage.Log{ //nolint:errcheck
 		UserUUID: claims.UserUUID,
 		Action:   fmt.Sprintf("issue_cert:%s:%s", caUUID, req.CommonName),
@@ -261,6 +304,11 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"cert_pem":      resp.CertPEM,
 		"serial_number": resp.SerialNumber,
+		"subject_dn":    resp.SubjectDN,
+		"issuer_dn":     resp.IssuerDN,
+		"not_before":    resp.NotBefore,
+		"not_after":     resp.NotAfter,
+		"cert_uuid":     certUUID,
 	})
 }
 
@@ -321,6 +369,91 @@ func (s *Server) handlePublicCAIssuer(w http.ResponseWriter, r *http.Request) {
 	caUUID := r.PathValue("caUUID")
 	if s.revocationSvc == nil {
 		writeError(w, http.StatusServiceUnavailable, "吊销服务未启用")
+		return
+	}
+	certPEM, err := s.revocationSvc.GetCAIssuerCert(r.Context(), caUUID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, certPEM)
+}
+
+// ---- 自定义路径的吊销服务处理器 ----
+
+// lookupCAByPath 通过自定义路径查找 CA UUID。
+func (s *Server) lookupCAByPath(ctx context.Context, serviceType, path string) (string, error) {
+	var caUUID string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT ca_uuid FROM revocation_services WHERE service_type = ? AND path = ? AND enabled = 1`,
+		serviceType, path,
+	).Scan(&caUUID)
+	if err != nil {
+		return "", fmt.Errorf("未找到路径 %s 对应的 %s 服务配置", path, serviceType)
+	}
+	return caUUID, nil
+}
+
+// handlePublicCRLByPath 通过自定义路径返回 CRL。
+func (s *Server) handlePublicCRLByPath(w http.ResponseWriter, r *http.Request) {
+	path := r.PathValue("path")
+	if s.revocationSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "吊销服务未启用")
+		return
+	}
+	caUUID, err := s.lookupCAByPath(r.Context(), "crl", path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	crl, err := s.revocationSvc.GetCRL(r.Context(), caUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/pkix-crl")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.crl\"", path))
+	w.WriteHeader(http.StatusOK)
+	w.Write(crl) //nolint:errcheck
+}
+
+// handlePublicOCSPByPath 通过自定义路径处理 OCSP 请求。
+func (s *Server) handlePublicOCSPByPath(w http.ResponseWriter, r *http.Request) {
+	path := r.PathValue("path")
+	if s.revocationSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "吊销服务未启用")
+		return
+	}
+	caUUID, err := s.lookupCAByPath(r.Context(), "ocsp", path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	serialNumber := r.URL.Query().Get("serial")
+	if serialNumber == "" {
+		writeError(w, http.StatusBadRequest, "缺少 serial 参数")
+		return
+	}
+	status, err := s.revocationSvc.QueryOCSPStatus(r.Context(), caUUID, serialNumber)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+// handlePublicCAIssuerByPath 通过自定义路径返回 CA 证书。
+func (s *Server) handlePublicCAIssuerByPath(w http.ResponseWriter, r *http.Request) {
+	path := r.PathValue("path")
+	if s.revocationSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "吊销服务未启用")
+		return
+	}
+	caUUID, err := s.lookupCAByPath(r.Context(), "caissuer", path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	certPEM, err := s.revocationSvc.GetCAIssuerCert(r.Context(), caUUID)

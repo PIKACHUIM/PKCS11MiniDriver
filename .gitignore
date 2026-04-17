@@ -1,0 +1,12 @@
+# 构建产物
+bin/
+
+# servers 数据目录（数据库、主密钥）
+servers/data/
+clients/data/
+
+# 任意位置的 SQLite 数据库文件
+*.db
+*.db-shm
+*.db-wal
+*.masterkey

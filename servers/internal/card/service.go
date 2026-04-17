@@ -37,17 +37,177 @@ func NewService(cardRepo *storage.CardRepo, certRepo *storage.CertRepo, masterKe
 	}
 }
 
-// CreateCard 创建云端卡片。
-func (s *Service) CreateCard(ctx context.Context, userUUID, cardName, remark string) (*storage.Card, error) {
+// CreateCardRequest 是创建卡片的请求参数。
+type CreateCardRequest struct {
+	UserUUID        string
+	CardName        string
+	Remark          string
+	StorageZoneUUID string
+	PIN             string // 明文 PIN（加密后存储）
+	PUK             string // 明文 PUK（加密后存储）
+	AdminKey        string // 明文 Admin Key（加密后存储）
+	PINRetries      int    // PIN 错误最大次数，默认 3
+}
+
+// CreateCard 创建云端卡片，支持 PIN/PUK/Admin Key 设置。
+func (s *Service) CreateCard(ctx context.Context, req *CreateCardRequest) (*storage.Card, error) {
 	card := &storage.Card{
-		UserUUID: userUUID,
-		CardName: cardName,
-		Remark:   remark,
+		UserUUID:        req.UserUUID,
+		CardName:        req.CardName,
+		Remark:          req.Remark,
+		StorageZoneUUID: req.StorageZoneUUID,
+		PINRetries:      req.PINRetries,
 	}
+	if card.PINRetries <= 0 {
+		card.PINRetries = 3
+	}
+
+	// 加密存储 PIN/PUK/Admin Key
+	if req.PIN != "" {
+		enc, err := encryptWithMasterKey(s.masterKey, []byte(req.PIN))
+		if err != nil {
+			return nil, fmt.Errorf("加密 PIN 失败: %w", err)
+		}
+		card.PINData = enc
+	}
+	if req.PUK != "" {
+		enc, err := encryptWithMasterKey(s.masterKey, []byte(req.PUK))
+		if err != nil {
+			return nil, fmt.Errorf("加密 PUK 失败: %w", err)
+		}
+		card.PUKData = enc
+	}
+	if req.AdminKey != "" {
+		enc, err := encryptWithMasterKey(s.masterKey, []byte(req.AdminKey))
+		if err != nil {
+			return nil, fmt.Errorf("加密 Admin Key 失败: %w", err)
+		}
+		card.AdminKeyData = enc
+	}
+
 	if err := s.cardRepo.Create(ctx, card); err != nil {
 		return nil, fmt.Errorf("创建卡片失败: %w", err)
 	}
+	// 返回时清空敏感数据
+	card.PINData = nil
+	card.PUKData = nil
+	card.AdminKeyData = nil
 	return card, nil
+}
+
+// VerifyPIN 验证 PIN 码，失败时递增计数，超限时锁定。
+// 返回 (是否验证成功, 剩余次数, error)
+func (s *Service) VerifyPIN(ctx context.Context, cardUUID, pin string) (bool, int, error) {
+	card, err := s.cardRepo.GetByUUID(ctx, cardUUID)
+	if err != nil {
+		return false, 0, err
+	}
+	if card.PINLocked {
+		return false, 0, fmt.Errorf("PIN 已锁定，请使用 PUK 解锁")
+	}
+	if card.PINData == nil {
+		// 未设置 PIN，直接通过
+		return true, card.PINRetries, nil
+	}
+
+	// 解密并比较 PIN
+	plainPIN, err := decryptWithMasterKey(s.masterKey, card.PINData)
+	if err != nil {
+		return false, 0, fmt.Errorf("解密 PIN 失败: %w", err)
+	}
+	if string(plainPIN) != pin {
+		// PIN 错误，递增失败次数
+		newFailedCount := card.PINFailedCount + 1
+		locked := newFailedCount >= card.PINRetries
+		if err := s.cardRepo.UpdatePINStatus(ctx, cardUUID, newFailedCount, locked); err != nil {
+			return false, 0, fmt.Errorf("更新 PIN 状态失败: %w", err)
+		}
+		remaining := card.PINRetries - newFailedCount
+		if remaining < 0 {
+			remaining = 0
+		}
+		if locked {
+			return false, 0, fmt.Errorf("PIN 错误次数过多，已锁定")
+		}
+		return false, remaining, fmt.Errorf("PIN 错误，剩余 %d 次", remaining)
+	}
+
+	// PIN 正确，重置失败次数
+	if card.PINFailedCount > 0 {
+		s.cardRepo.UpdatePINStatus(ctx, cardUUID, 0, false) //nolint:errcheck
+	}
+	return true, card.PINRetries, nil
+}
+
+// UnlockWithPUK 使用 PUK 解锁并重置 PIN。
+func (s *Service) UnlockWithPUK(ctx context.Context, cardUUID, puk, newPIN string) error {
+	card, err := s.cardRepo.GetByUUID(ctx, cardUUID)
+	if err != nil {
+		return err
+	}
+	if card.PUKData == nil {
+		return fmt.Errorf("未设置 PUK")
+	}
+
+	plainPUK, err := decryptWithMasterKey(s.masterKey, card.PUKData)
+	if err != nil {
+		return fmt.Errorf("解密 PUK 失败: %w", err)
+	}
+	if string(plainPUK) != puk {
+		return fmt.Errorf("PUK 错误")
+	}
+
+	// PUK 正确，重置 PIN
+	if newPIN == "" {
+		// 仅解锁，不重置 PIN
+		return s.cardRepo.UpdatePINStatus(ctx, cardUUID, 0, false)
+	}
+
+	encPIN, err := encryptWithMasterKey(s.masterKey, []byte(newPIN))
+	if err != nil {
+		return fmt.Errorf("加密新 PIN 失败: %w", err)
+	}
+	return s.cardRepo.UpdatePINData(ctx, cardUUID, encPIN)
+}
+
+// ResetWithAdminKey 使用 Admin Key 重置 PIN 和 PUK。
+func (s *Service) ResetWithAdminKey(ctx context.Context, cardUUID, adminKey, newPIN, newPUK string) error {
+	card, err := s.cardRepo.GetByUUID(ctx, cardUUID)
+	if err != nil {
+		return err
+	}
+	if card.AdminKeyData == nil {
+		return fmt.Errorf("未设置 Admin Key")
+	}
+
+	plainAdminKey, err := decryptWithMasterKey(s.masterKey, card.AdminKeyData)
+	if err != nil {
+		return fmt.Errorf("解密 Admin Key 失败: %w", err)
+	}
+	if string(plainAdminKey) != adminKey {
+		return fmt.Errorf("Admin Key 错误")
+	}
+
+	// Admin Key 正确，重置 PIN 和 PUK
+	if newPIN != "" {
+		encPIN, err := encryptWithMasterKey(s.masterKey, []byte(newPIN))
+		if err != nil {
+			return fmt.Errorf("加密新 PIN 失败: %w", err)
+		}
+		if err := s.cardRepo.UpdatePINData(ctx, cardUUID, encPIN); err != nil {
+			return err
+		}
+	}
+	if newPUK != "" {
+		encPUK, err := encryptWithMasterKey(s.masterKey, []byte(newPUK))
+		if err != nil {
+			return fmt.Errorf("加密新 PUK 失败: %w", err)
+		}
+		if err := s.cardRepo.UpdatePUKData(ctx, cardUUID, encPUK); err != nil {
+			return fmt.Errorf("更新 PUK 失败: %w", err)
+		}
+	}
+	return nil
 }
 
 // GetCard 获取卡片（验证归属）。

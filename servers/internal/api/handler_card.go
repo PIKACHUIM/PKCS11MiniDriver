@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/globaltrusts/server-card/internal/card"
 	"github.com/globaltrusts/server-card/internal/storage"
 )
 
@@ -24,8 +25,13 @@ func (s *Server) handleListCards(w http.ResponseWriter, r *http.Request) {
 
 // CreateCardRequest 是创建卡片请求体。
 type CreateCardRequest struct {
-	CardName string `json:"card_name"`
-	Remark   string `json:"remark"`
+	CardName        string `json:"card_name"`
+	Remark          string `json:"remark"`
+	StorageZoneUUID string `json:"storage_zone_uuid"` // 存储区域 UUID（可选）
+	PIN             string `json:"pin"`              // 初始 PIN（可选）
+	PUK             string `json:"puk"`              // 初始 PUK（可选）
+	AdminKey        string `json:"admin_key"`        // Admin Key（可选）
+	PINRetries      int    `json:"pin_retries"`      // PIN 错误最大次数，默认 3
 }
 
 func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +46,16 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := s.cardSvc.CreateCard(r.Context(), claims.UserUUID, req.CardName, req.Remark)
+	c, err := s.cardSvc.CreateCard(r.Context(), &card.CreateCardRequest{
+		UserUUID:        claims.UserUUID,
+		CardName:        req.CardName,
+		Remark:          req.Remark,
+		StorageZoneUUID: req.StorageZoneUUID,
+		PIN:             req.PIN,
+		PUK:             req.PUK,
+		AdminKey:        req.AdminKey,
+		PINRetries:      req.PINRetries,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -227,6 +242,7 @@ func (s *Server) handleListCertsFiltered(w http.ResponseWriter, r *http.Request)
 	userUUID := r.URL.Query().Get("user_uuid")
 	caUUID := r.URL.Query().Get("ca_uuid")
 	tmplUUID := r.URL.Query().Get("template_uuid")
+	certType := r.URL.Query().Get("cert_type")
 	status := r.URL.Query().Get("status")
 	page, pageSize := parsePagination(r)
 
@@ -237,15 +253,19 @@ func (s *Server) handleListCertsFiltered(w http.ResponseWriter, r *http.Request)
 	}
 
 	certRepo := storage.NewCertRepo(s.db)
-	certs, total, err := certRepo.ListFiltered(r.Context(), userUUID, caUUID, tmplUUID, status, page, pageSize)
+	certs, total, err := certRepo.ListFiltered(r.Context(), userUUID, caUUID, tmplUUID, "", certType, status, page, pageSize)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if certs == nil {
+		certs = []*storage.Certificate{}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"certs": certs,
-		"total": total,
-		"page":  page,
+		"items":     certs,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
 	})
 }
 
@@ -277,7 +297,7 @@ func (s *Server) handleRevokeCertByUUID(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// 更新证书吊销状态
-	if err := certRepo.Revoke(r.Context(), certUUID); err != nil {
+	if err := certRepo.Revoke(r.Context(), certUUID, req.Reason); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -479,4 +499,89 @@ func (s *Server) handleExportCert(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusBadRequest, "不支持的导出格式，支持 pem/der/pkcs12")
 	}
+}
+
+// ---- PIN/PUK/Admin Key 处理器 ----
+
+// handleVerifyPIN 验证卡片 PIN 码。
+func (s *Server) handleVerifyPIN(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromCtx(r.Context())
+	cardUUID := r.PathValue("uuid")
+
+	var req struct {
+		PIN string `json:"pin"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	// 验证卡片归属
+	if _, err := s.cardSvc.GetCard(r.Context(), cardUUID, claims.UserUUID); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	ok, remaining, err := s.cardSvc.VerifyPIN(r.Context(), cardUUID, req.PIN)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   ok,
+		"remaining": remaining,
+	})
+}
+
+// handleUnlockWithPUK 使用 PUK 解锁并重置 PIN。
+func (s *Server) handleUnlockWithPUK(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromCtx(r.Context())
+	cardUUID := r.PathValue("uuid")
+
+	var req struct {
+		PUK    string `json:"puk"`
+		NewPIN string `json:"new_pin"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	if _, err := s.cardSvc.GetCard(r.Context(), cardUUID, claims.UserUUID); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	if err := s.cardSvc.UnlockWithPUK(r.Context(), cardUUID, req.PUK, req.NewPIN); err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "PIN 已重置"})
+}
+
+// handleResetWithAdminKey 使用 Admin Key 重置 PIN 和 PUK。
+func (s *Server) handleResetWithAdminKey(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromCtx(r.Context())
+	cardUUID := r.PathValue("uuid")
+
+	var req struct {
+		AdminKey string `json:"admin_key"`
+		NewPIN   string `json:"new_pin"`
+		NewPUK   string `json:"new_puk"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	if _, err := s.cardSvc.GetCard(r.Context(), cardUUID, claims.UserUUID); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	if err := s.cardSvc.ResetWithAdminKey(r.Context(), cardUUID, req.AdminKey, req.NewPIN, req.NewPUK); err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "PIN 和 PUK 已重置"})
 }

@@ -74,7 +74,7 @@
 5、支持注册GPG、SSH证书
 6、支持片上生成密钥，生成CSR，并对CSR签名，确保是片上生成的
 7、密钥安全性需要符合密钥存储类型模板要求，当使用本地虚拟智能卡的时候：
-高安全性：虚拟智能卡支持密钥存储在TPM内（不可恢复）
+高安全性：虚拟智能卡要求密钥存储在TPM内（不可恢复），并且使用EK认证确保是允许的TPM（https://learn.microsoft.com/zh-cn/windows-server/identity/ad-ds/manage/component-updates/tpm-key-attestation）
 中安全性：密钥存储本地，使用TPM片上生成密钥加密+使用用户云端公钥加密（可恢复）
 低安全性：密钥存储本地，使用密码加密+使用用户云端公钥加密（可恢复）
 

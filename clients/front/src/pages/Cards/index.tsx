@@ -164,7 +164,7 @@ const Cards: React.FC = () => {
       ),
     },
     {
-      title: 'Slot 类型',
+      title: 'Slot',
       dataIndex: 'slot_type',
       width: 100,
       render: (v: string) => (

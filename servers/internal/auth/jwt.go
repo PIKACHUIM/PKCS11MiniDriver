@@ -13,8 +13,32 @@ import (
 type Claims struct {
 	UserUUID string `json:"user_uuid"`
 	Username string `json:"username"`
-	Role     string `json:"role"` // admin/user/readonly
+	Role     string `json:"role"` // super_admin/admin/operator/user/readonly
 	jwt.RegisteredClaims
+}
+
+// 角色常量定义。
+const (
+	RoleSuperAdmin = "super_admin" // 超级管理员：全权限
+	RoleAdmin      = "admin"       // 管理员：管理级权限（CA/模板/用户管理）
+	RoleOperator   = "operator"    // 操作员：操作级权限（证书颁发/订单/吊销）
+	RoleUser       = "user"        // 普通用户：自助级权限
+	RoleReadonly   = "readonly"    // 只读用户：只读权限
+)
+
+// IsAdmin 检查角色是否具有管理员权限（super_admin 或 admin）。
+func IsAdmin(role string) bool {
+	return role == RoleSuperAdmin || role == RoleAdmin
+}
+
+// IsOperatorOrAbove 检查角色是否具有操作员或以上权限。
+func IsOperatorOrAbove(role string) bool {
+	return role == RoleSuperAdmin || role == RoleAdmin || role == RoleOperator
+}
+
+// CanWrite 检查角色是否具有写入权限（非 readonly）。
+func CanWrite(role string) bool {
+	return role != RoleReadonly
 }
 
 // Manager 提供 JWT 签发、验证、黑名单和 Token 轮换。

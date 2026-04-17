@@ -240,7 +240,9 @@ export interface PKICert {
 export interface IssueCertRequest {
   csr_uuid: string;
   ca_uuid: string;
-  validity_days: number;
+  validity_days?: number;   // 与 not_before/not_after 二选一
+  not_before?: string;      // ISO8601
+  not_after?: string;       // ISO8601
   remark?: string;
 }
 

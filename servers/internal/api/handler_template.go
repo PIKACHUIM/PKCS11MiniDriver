@@ -349,7 +349,7 @@ func (s *Server) handleDeleteStorageZone(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleListOIDs(w http.ResponseWriter, r *http.Request) {
 	usageType := r.URL.Query().Get("usage_type")
-	query := `SELECT uuid, oid_value, name, description, usage_type, created_at, updated_at FROM custom_oids`
+	query := `SELECT uuid, oid_value, name, description, usage_type, asn1_type, created_at, updated_at FROM custom_oids`
 	var args []interface{}
 	if usageType != "" {
 		query += ` WHERE usage_type = ?`
@@ -365,7 +365,7 @@ func (s *Server) handleListOIDs(w http.ResponseWriter, r *http.Request) {
 	var oids []storage.CustomOID
 	for rows.Next() {
 		var o storage.CustomOID
-		if err := rows.Scan(&o.UUID, &o.OIDValue, &o.Name, &o.Description, &o.UsageType, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		if err := rows.Scan(&o.UUID, &o.OIDValue, &o.Name, &o.Description, &o.UsageType, &o.ASN1Type, &o.CreatedAt, &o.UpdatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -384,12 +384,15 @@ func (s *Server) handleCreateOID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "OID 值和名称不能为空")
 		return
 	}
+	if o.ASN1Type == "" {
+		o.ASN1Type = "UTF8String" // 默认 ASN.1 类型
+	}
 	o.UUID = uuid.New().String()
 	o.CreatedAt = time.Now()
 	o.UpdatedAt = time.Now()
 	_, err := s.db.ExecContext(r.Context(),
-		`INSERT INTO custom_oids (uuid, oid_value, name, description, usage_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		o.UUID, o.OIDValue, o.Name, o.Description, o.UsageType, o.CreatedAt, o.UpdatedAt)
+		`INSERT INTO custom_oids (uuid, oid_value, name, description, usage_type, asn1_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		o.UUID, o.OIDValue, o.Name, o.Description, o.UsageType, o.ASN1Type, o.CreatedAt, o.UpdatedAt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

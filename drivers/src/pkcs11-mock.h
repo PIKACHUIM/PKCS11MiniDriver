@@ -29,7 +29,7 @@
 #include "ipc_json.h"
 
 // Removes unused parameter warning
-#define UNUSED(x) (void)(x)
+#define UNUSED(x) do { (void)(x); } while(0)
 
 
 #ifdef _WIN32
@@ -83,7 +83,10 @@
 #endif // #ifdef _WIN32
 
 
-#define IGNORE(P) (void)(P)
+#ifdef IGNORE
+#undef IGNORE
+#endif
+#define IGNORE(P) do { (void)(P); } while(0)
 
 #define PKCS11_MOCK_CK_INFO_MANUFACTURER_ID       "Pikachu SmartCard MiniDriver"
 #define PKCS11_MOCK_CK_INFO_LIBRARY_DESCRIPTION   "Pikachu CSP PKCS #11 Library"

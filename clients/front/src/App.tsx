@@ -14,7 +14,6 @@ const Cards = lazy(() => import('./pages/Cards'));
 const Certs = lazy(() => import('./pages/Certs'));
 const TOTP = lazy(() => import('./pages/TOTP'));
 const PKI = lazy(() => import('./pages/PKI'));
-const PKISelfSign = lazy(() => import('./pages/PKI/SelfSign'));
 const PKILocalCA = lazy(() => import('./pages/PKI/LocalCA'));
 const PKICSR = lazy(() => import('./pages/PKI/CSR'));
 const PKICerts = lazy(() => import('./pages/PKI/Certs'));
@@ -75,7 +74,7 @@ const App: React.FC = () => {
               <Route path="totp" element={<S><TOTP /></S>} />
               <Route path="pki" element={<S><PKI /></S>}>
                 <Route index element={<Navigate to="/pki/csr" replace />} />
-                <Route path="selfsign" element={<S><PKISelfSign /></S>} />
+                <Route path="selfsign" element={<Navigate to="/pki/certs" replace />} />
                 <Route path="ca" element={<S><PKILocalCA /></S>} />
                 <Route path="csr" element={<S><PKICSR /></S>} />
                 <Route path="certs" element={<S><PKICerts /></S>} />

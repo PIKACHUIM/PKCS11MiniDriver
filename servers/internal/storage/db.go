@@ -1,5 +1,9 @@
 // Package storage 提供 servers 的数据存储层。
-// 使用 SQLite（开发/单机）或 PostgreSQL（生产）。
+// 支持 SQLite（默认）、MySQL、PostgreSQL 三种数据库后端。
+// 通过 DATABASE_URL 环境变量识别驱动类型：
+//   - 未设置：使用 SQLite（零配置开箱即用）
+//   - postgres://...：使用 PostgreSQL
+//   - mysql://...：使用 MySQL
 package storage
 
 import (
@@ -7,32 +11,51 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
+)
+
+// DriverType 是数据库驱动类型。
+type DriverType string
+
+const (
+	DriverSQLite   DriverType = "sqlite"
+	DriverPostgres DriverType = "postgres"
+	DriverMySQL    DriverType = "mysql"
 )
 
 // DB 封装数据库连接。
 type DB struct {
 	*sql.DB
+	Driver DriverType // 当前使用的驱动类型
 }
 
 // Open 打开数据库并执行迁移。
-func Open(path string) (*DB, error) {
-	// 确保目录存在
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return nil, fmt.Errorf("创建数据库目录失败: %w", err)
+// 当 databaseURL 非空时，根据 URL 前缀选择驱动；否则使用 SQLite（path 参数）。
+func Open(path, databaseURL string) (*DB, error) {
+	driver, dsn, err := resolveDSN(path, databaseURL)
+	if err != nil {
+		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)")
+	// SQLite 需要确保目录存在
+	if driver == DriverSQLite {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return nil, fmt.Errorf("创建数据库目录失败: %w", err)
+		}
+	}
+
+	db, err := sql.Open(string(driver), dsn)
 	if err != nil {
-		return nil, fmt.Errorf("打开数据库失败: %w", err)
+		return nil, fmt.Errorf("打开数据库失败 (%s): %w", driver, err)
 	}
 
 	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("数据库连接失败: %w", err)
+		return nil, fmt.Errorf("数据库连接失败 (%s): %w", driver, err)
 	}
 
-	wrapped := &DB{db}
+	wrapped := &DB{DB: db, Driver: driver}
 	if err := wrapped.migrate(); err != nil {
 		return nil, fmt.Errorf("数据库迁移失败: %w", err)
 	}
@@ -40,8 +63,123 @@ func Open(path string) (*DB, error) {
 	return wrapped, nil
 }
 
-// migrate 执行数据库 Schema 迁移。
+// resolveDSN 根据 databaseURL 解析驱动类型和 DSN。
+func resolveDSN(path, databaseURL string) (DriverType, string, error) {
+	if databaseURL == "" {
+		// 默认 SQLite
+		dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+		return DriverSQLite, dsn, nil
+	}
+
+	switch {
+	case strings.HasPrefix(databaseURL, "postgres://") || strings.HasPrefix(databaseURL, "postgresql://"):
+		return DriverPostgres, databaseURL, nil
+	case strings.HasPrefix(databaseURL, "mysql://"):
+		// 将 mysql:// 转换为 go-sql-driver/mysql 格式
+		dsn := convertMySQLDSN(databaseURL)
+		return DriverMySQL, dsn, nil
+	default:
+		// 未知前缀，尝试作为 SQLite 路径
+		dsn := databaseURL + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+		return DriverSQLite, dsn, nil
+	}
+}
+
+// convertMySQLDSN 将 mysql://user:pass@host:port/db 转换为 user:pass@tcp(host:port)/db?parseTime=true
+func convertMySQLDSN(url string) string {
+	// 去掉 mysql:// 前缀
+	s := strings.TrimPrefix(url, "mysql://")
+	// 找到 @ 分隔用户信息和主机
+	atIdx := strings.LastIndex(s, "@")
+	if atIdx < 0 {
+		return s + "?parseTime=true&charset=utf8mb4"
+	}
+	userInfo := s[:atIdx]
+	hostDB := s[atIdx+1:]
+	// 找到 / 分隔主机和数据库
+	slashIdx := strings.Index(hostDB, "/")
+	if slashIdx < 0 {
+		return userInfo + "@tcp(" + hostDB + ")/?parseTime=true&charset=utf8mb4"
+	}
+	host := hostDB[:slashIdx]
+	dbPart := hostDB[slashIdx:]
+	return userInfo + "@tcp(" + host + ")" + dbPart + "?parseTime=true&charset=utf8mb4"
+}
+
+// Placeholder 返回当前驱动的占位符（SQLite/MySQL 用 ?，PostgreSQL 用 $1,$2...）。
+func (db *DB) Placeholder(n int) string {
+	if db.Driver == DriverPostgres {
+		return fmt.Sprintf("$%d", n)
+	}
+	return "?"
+}
+
+// migrate 执行数据库 Schema 迁移（创建表 + 增量 ALTER TABLE）。
 func (db *DB) migrate() error {
+	// 第一步：创建基础表结构
+	if err := db.createTables(); err != nil {
+		return fmt.Errorf("创建表失败: %w", err)
+	}
+	// 第二步：增量添加新字段（ALTER TABLE IF NOT EXISTS 方式）
+	if err := db.alterTables(); err != nil {
+		return fmt.Errorf("升级表结构失败: %w", err)
+	}
+	return nil
+}
+
+// execIgnoreError 执行 SQL，忽略"列已存在"等幂等错误。
+func (db *DB) execIgnoreError(sql string) {
+	db.Exec(sql) //nolint:errcheck // ALTER TABLE 幂等操作，忽略"列已存在"错误
+}
+
+// alterTables 增量添加新字段（幂等，可重复执行）。
+func (db *DB) alterTables() error {
+	// cards 表：增加 storage_zone_uuid, pin_data, puk_data, admin_key_data, pin_retries, pin_failed_count, pin_locked
+	db.execIgnoreError(`ALTER TABLE cards ADD COLUMN storage_zone_uuid TEXT NOT NULL DEFAULT ''`)
+	db.execIgnoreError(`ALTER TABLE cards ADD COLUMN pin_data BLOB`)
+	db.execIgnoreError(`ALTER TABLE cards ADD COLUMN puk_data BLOB`)
+	db.execIgnoreError(`ALTER TABLE cards ADD COLUMN admin_key_data BLOB`)
+	db.execIgnoreError(`ALTER TABLE cards ADD COLUMN pin_retries INTEGER NOT NULL DEFAULT 3`)
+	db.execIgnoreError(`ALTER TABLE cards ADD COLUMN pin_failed_count INTEGER NOT NULL DEFAULT 0`)
+	db.execIgnoreError(`ALTER TABLE cards ADD COLUMN pin_locked INTEGER NOT NULL DEFAULT 0`)
+
+	// certificates 表：增加完整元数据字段
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN subject_dn TEXT NOT NULL DEFAULT ''`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN issuer_dn TEXT NOT NULL DEFAULT ''`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN serial_hex TEXT NOT NULL DEFAULT ''`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN not_before DATETIME`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN not_after DATETIME`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN key_usage INTEGER NOT NULL DEFAULT 0`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN ext_key_usage TEXT NOT NULL DEFAULT '[]'`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN san_dns TEXT NOT NULL DEFAULT '[]'`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN san_ip TEXT NOT NULL DEFAULT '[]'`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN san_email TEXT NOT NULL DEFAULT '[]'`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN revoke_reason INTEGER NOT NULL DEFAULT 0`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN user_uuid TEXT NOT NULL DEFAULT ''`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN template_uuid TEXT NOT NULL DEFAULT ''`)
+	db.execIgnoreError(`ALTER TABLE certificates ADD COLUMN card_uuid_ref TEXT NOT NULL DEFAULT ''`)
+
+	// custom_oids 表：增加 asn1_type 字段
+	db.execIgnoreError(`ALTER TABLE custom_oids ADD COLUMN asn1_type TEXT NOT NULL DEFAULT 'UTF8String'`)
+
+	// issuance_templates 表：增加 cert_ext_tmpl_uuid 关联字段
+	db.execIgnoreError(`ALTER TABLE issuance_templates ADD COLUMN cert_ext_tmpl_uuid TEXT NOT NULL DEFAULT ''`)
+
+	// cert_ext_templates 表：增加 netscape_config, csp_config, asn1_extensions 字段
+	db.execIgnoreError(`ALTER TABLE cert_ext_templates ADD COLUMN netscape_config TEXT NOT NULL DEFAULT ''`)
+	db.execIgnoreError(`ALTER TABLE cert_ext_templates ADD COLUMN csp_config TEXT NOT NULL DEFAULT ''`)
+	db.execIgnoreError(`ALTER TABLE cert_ext_templates ADD COLUMN asn1_extensions TEXT NOT NULL DEFAULT '[]'`)
+
+	// cert_orders 表：增加完整状态机字段
+	db.execIgnoreError(`ALTER TABLE cert_orders ADD COLUMN paid_at DATETIME`)
+	db.execIgnoreError(`ALTER TABLE cert_orders ADD COLUMN cert_apply_tmpl_uuid TEXT NOT NULL DEFAULT ''`)
+	db.execIgnoreError(`ALTER TABLE cert_orders ADD COLUMN frozen_cents INTEGER NOT NULL DEFAULT 0`)
+
+	return nil
+}
+
+// createTables 创建所有基础表（幂等，IF NOT EXISTS）。
+func (db *DB) createTables() error {
 	schema := `
 -- 用户表
 CREATE TABLE IF NOT EXISTS users (
@@ -62,29 +200,49 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- 云端卡片表
 CREATE TABLE IF NOT EXISTS cards (
-    uuid       TEXT PRIMARY KEY,
-    user_uuid  TEXT NOT NULL REFERENCES users(uuid) ON DELETE CASCADE,
-    card_name  TEXT NOT NULL,
-    remark     TEXT NOT NULL DEFAULT '',
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    uuid                TEXT PRIMARY KEY,
+    user_uuid           TEXT NOT NULL REFERENCES users(uuid) ON DELETE CASCADE,
+    card_name           TEXT NOT NULL,
+    remark              TEXT NOT NULL DEFAULT '',
+    storage_zone_uuid   TEXT NOT NULL DEFAULT '',
+    pin_data            BLOB,
+    puk_data            BLOB,
+    admin_key_data      BLOB,
+    pin_retries         INTEGER NOT NULL DEFAULT 3,
+    pin_failed_count    INTEGER NOT NULL DEFAULT 0,
+    pin_locked          INTEGER NOT NULL DEFAULT 0,
+    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 云端证书表（私钥加密存储，不离开服务器）
 CREATE TABLE IF NOT EXISTS certificates (
     uuid               TEXT PRIMARY KEY,
     card_uuid          TEXT NOT NULL REFERENCES cards(uuid) ON DELETE CASCADE,
+    user_uuid          TEXT NOT NULL DEFAULT '',
     cert_type          TEXT NOT NULL DEFAULT 'x509',
     key_type           TEXT NOT NULL DEFAULT 'ec256',
-    cert_content       BLOB,              -- 公开部分（X.509 DER / 公钥）
-    private_data       BLOB,              -- 加密的私钥（服务端主密钥加密）
+    cert_content       BLOB,
+    private_data       BLOB,
     remark             TEXT NOT NULL DEFAULT '',
     order_no           TEXT NOT NULL DEFAULT '',
     ca_uuid            TEXT NOT NULL DEFAULT '',
-    serial_number      TEXT NOT NULL DEFAULT '',  -- X.509 序列号（十六进制）
+    serial_number      TEXT NOT NULL DEFAULT '',
+    serial_hex         TEXT NOT NULL DEFAULT '',
+    subject_dn         TEXT NOT NULL DEFAULT '',
+    issuer_dn          TEXT NOT NULL DEFAULT '',
+    not_before         DATETIME,
+    not_after          DATETIME,
+    key_usage          INTEGER NOT NULL DEFAULT 0,
+    ext_key_usage      TEXT NOT NULL DEFAULT '[]',
+    san_dns            TEXT NOT NULL DEFAULT '[]',
+    san_ip             TEXT NOT NULL DEFAULT '[]',
+    san_email          TEXT NOT NULL DEFAULT '[]',
     issuance_tmpl_uuid TEXT NOT NULL DEFAULT '',
+    template_uuid      TEXT NOT NULL DEFAULT '',
     storage_policy     TEXT NOT NULL DEFAULT '',
     revocation_status  TEXT NOT NULL DEFAULT 'active',
+    revoke_reason      INTEGER NOT NULL DEFAULT 0,
     revoked_at         DATETIME,
     created_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -93,14 +251,31 @@ CREATE TABLE IF NOT EXISTS certificates (
 CREATE INDEX IF NOT EXISTS idx_certs_revocation ON certificates(revocation_status);
 CREATE INDEX IF NOT EXISTS idx_certs_ca ON certificates(ca_uuid);
 CREATE INDEX IF NOT EXISTS idx_certs_order ON certificates(order_no);
+CREATE INDEX IF NOT EXISTS idx_certs_user ON certificates(user_uuid);
 
--- 操作日志表
+-- 审计日志表（链式哈希完整性）
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_uuid     TEXT NOT NULL DEFAULT '',
+    action        TEXT NOT NULL,
+    resource_type TEXT NOT NULL DEFAULT '',
+    resource_uuid TEXT NOT NULL DEFAULT '',
+    detail        TEXT NOT NULL DEFAULT '{}',
+    ip_address    TEXT NOT NULL DEFAULT '',
+    prev_hash     TEXT NOT NULL DEFAULT '',
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_uuid);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
+
+-- 操作日志表（兼容旧版）
 CREATE TABLE IF NOT EXISTS logs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     user_uuid   TEXT NOT NULL DEFAULT '',
     card_uuid   TEXT NOT NULL DEFAULT '',
     cert_uuid   TEXT NOT NULL DEFAULT '',
-    action      TEXT NOT NULL,       -- login/sign/decrypt/create_card/...
+    action      TEXT NOT NULL,
     ip_addr     TEXT NOT NULL DEFAULT '',
     user_agent  TEXT NOT NULL DEFAULT '',
     recorded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -125,15 +300,15 @@ CREATE TABLE IF NOT EXISTS payment_plugins (
 
 -- 充值订单表
 CREATE TABLE IF NOT EXISTS recharge_orders (
-    order_no     TEXT PRIMARY KEY,
-    user_uuid    TEXT NOT NULL REFERENCES users(uuid),
-    amount_cents INTEGER NOT NULL,
-    channel      TEXT NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'pending',
+    order_no      TEXT PRIMARY KEY,
+    user_uuid     TEXT NOT NULL REFERENCES users(uuid),
+    amount_cents  INTEGER NOT NULL,
+    channel       TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
     callback_data BLOB,
-    created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    paid_at      DATETIME,
-    expires_at   DATETIME NOT NULL
+    created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    paid_at       DATETIME,
+    expires_at    DATETIME NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_recharge_orders_user ON recharge_orders(user_uuid);
@@ -141,7 +316,7 @@ CREATE INDEX IF NOT EXISTS idx_recharge_orders_status ON recharge_orders(status)
 
 -- 用户余额表
 CREATE TABLE IF NOT EXISTS user_balances (
-    user_uuid       TEXT PRIMARY KEY REFERENCES users(uuid),
+    user_uuid        TEXT PRIMARY KEY REFERENCES users(uuid),
     available_cents  INTEGER NOT NULL DEFAULT 0,
     frozen_cents     INTEGER NOT NULL DEFAULT 0,
     total_recharge   INTEGER NOT NULL DEFAULT 0,
@@ -250,16 +425,16 @@ CREATE TABLE IF NOT EXISTS subject_templates (
 
 -- 扩展信息模板表（SAN 配置）
 CREATE TABLE IF NOT EXISTS extension_templates (
-    uuid                TEXT PRIMARY KEY,
-    name                TEXT NOT NULL,
-    max_dns             INTEGER NOT NULL DEFAULT 10,
-    max_email           INTEGER NOT NULL DEFAULT 5,
-    max_ip              INTEGER NOT NULL DEFAULT 5,
-    max_uri             INTEGER NOT NULL DEFAULT 5,
-    require_dns_verify  INTEGER NOT NULL DEFAULT 0,
+    uuid                 TEXT PRIMARY KEY,
+    name                 TEXT NOT NULL,
+    max_dns              INTEGER NOT NULL DEFAULT 10,
+    max_email            INTEGER NOT NULL DEFAULT 5,
+    max_ip               INTEGER NOT NULL DEFAULT 5,
+    max_uri              INTEGER NOT NULL DEFAULT 5,
+    require_dns_verify   INTEGER NOT NULL DEFAULT 0,
     require_email_verify INTEGER NOT NULL DEFAULT 0,
-    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 密钥用途模板表
@@ -274,40 +449,63 @@ CREATE TABLE IF NOT EXISTS key_usage_templates (
 
 -- 证书扩展模板表
 CREATE TABLE IF NOT EXISTS cert_ext_templates (
-    uuid            TEXT PRIMARY KEY,
-    name            TEXT NOT NULL,
-    crl_dist_points TEXT NOT NULL DEFAULT '[]',
-    ocsp_servers    TEXT NOT NULL DEFAULT '[]',
-    aia_issuers     TEXT NOT NULL DEFAULT '[]',
-    ct_servers      TEXT NOT NULL DEFAULT '[]',
-    ev_policy_oid   TEXT NOT NULL DEFAULT '',
-    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    uuid             TEXT PRIMARY KEY,
+    name             TEXT NOT NULL,
+    crl_dist_points  TEXT NOT NULL DEFAULT '[]',
+    ocsp_servers     TEXT NOT NULL DEFAULT '[]',
+    aia_issuers      TEXT NOT NULL DEFAULT '[]',
+    ct_servers       TEXT NOT NULL DEFAULT '[]',
+    ev_policy_oid    TEXT NOT NULL DEFAULT '',
+    netscape_config  TEXT NOT NULL DEFAULT '',
+    csp_config       TEXT NOT NULL DEFAULT '',
+    asn1_extensions  TEXT NOT NULL DEFAULT '[]',
+    created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 证书颁发模板表
 CREATE TABLE IF NOT EXISTS issuance_templates (
-    uuid                 TEXT PRIMARY KEY,
-    name                 TEXT NOT NULL,
-    is_ca                INTEGER NOT NULL DEFAULT 0,
-    path_len             INTEGER NOT NULL DEFAULT 0,
-    valid_days           TEXT NOT NULL DEFAULT '[365]',
-    allowed_key_types    TEXT NOT NULL DEFAULT '["ec256","rsa2048"]',
-    allowed_ca_uuids     TEXT NOT NULL DEFAULT '[]',
-    subject_tmpl_uuid    TEXT NOT NULL DEFAULT '',
-    extension_tmpl_uuid  TEXT NOT NULL DEFAULT '',
-    key_usage_tmpl_uuid  TEXT NOT NULL DEFAULT '',
+    uuid                  TEXT PRIMARY KEY,
+    name                  TEXT NOT NULL,
+    is_ca                 INTEGER NOT NULL DEFAULT 0,
+    path_len              INTEGER NOT NULL DEFAULT 0,
+    valid_days            TEXT NOT NULL DEFAULT '[365]',
+    allowed_key_types     TEXT NOT NULL DEFAULT '["ec256","rsa2048"]',
+    allowed_ca_uuids      TEXT NOT NULL DEFAULT '[]',
+    subject_tmpl_uuid     TEXT NOT NULL DEFAULT '',
+    extension_tmpl_uuid   TEXT NOT NULL DEFAULT '',
+    key_usage_tmpl_uuid   TEXT NOT NULL DEFAULT '',
     key_storage_tmpl_uuid TEXT NOT NULL DEFAULT '',
-    price_cents          INTEGER NOT NULL DEFAULT 0,
-    stock                INTEGER NOT NULL DEFAULT -1,
-    category             TEXT NOT NULL DEFAULT 'custom',
-    enabled              INTEGER NOT NULL DEFAULT 1,
-    created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    cert_ext_tmpl_uuid    TEXT NOT NULL DEFAULT '',
+    price_cents           INTEGER NOT NULL DEFAULT 0,
+    stock                 INTEGER NOT NULL DEFAULT -1,
+    category              TEXT NOT NULL DEFAULT 'custom',
+    enabled               INTEGER NOT NULL DEFAULT 1,
+    created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_issuance_templates_category ON issuance_templates(category);
 CREATE INDEX IF NOT EXISTS idx_issuance_templates_enabled ON issuance_templates(enabled);
+
+-- 证书申请模板表（面向用户的产品化配置）
+CREATE TABLE IF NOT EXISTS cert_apply_templates (
+    uuid                  TEXT PRIMARY KEY,
+    name                  TEXT NOT NULL,
+    issuance_tmpl_uuid    TEXT NOT NULL DEFAULT '',
+    valid_days            INTEGER NOT NULL DEFAULT 365,
+    ca_uuid               TEXT NOT NULL DEFAULT '',
+    enabled               INTEGER NOT NULL DEFAULT 1,
+    require_approval      INTEGER NOT NULL DEFAULT 0,
+    allow_renewal         INTEGER NOT NULL DEFAULT 0,
+    allowed_key_types     TEXT NOT NULL DEFAULT '["ec256","rsa2048"]',
+    price_cents           INTEGER NOT NULL DEFAULT 0,
+    description           TEXT NOT NULL DEFAULT '',
+    created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_cert_apply_templates_enabled ON cert_apply_templates(enabled);
 
 -- 吊销服务配置表
 CREATE TABLE IF NOT EXISTS revocation_services (
@@ -323,14 +521,17 @@ CREATE INDEX IF NOT EXISTS idx_revocation_services_ca ON revocation_services(ca_
 
 -- 证书订单表
 CREATE TABLE IF NOT EXISTS cert_orders (
-    uuid                  TEXT PRIMARY KEY,
-    user_uuid             TEXT NOT NULL REFERENCES users(uuid),
-    issuance_tmpl_uuid    TEXT NOT NULL DEFAULT '',
-    key_storage_tmpl_uuid TEXT NOT NULL DEFAULT '',
-    amount_cents          INTEGER NOT NULL DEFAULT 0,
-    status                TEXT NOT NULL DEFAULT 'pending',
-    created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    uuid                   TEXT PRIMARY KEY,
+    user_uuid              TEXT NOT NULL REFERENCES users(uuid),
+    issuance_tmpl_uuid     TEXT NOT NULL DEFAULT '',
+    cert_apply_tmpl_uuid   TEXT NOT NULL DEFAULT '',
+    key_storage_tmpl_uuid  TEXT NOT NULL DEFAULT '',
+    amount_cents           INTEGER NOT NULL DEFAULT 0,
+    frozen_cents           INTEGER NOT NULL DEFAULT 0,
+    status                 TEXT NOT NULL DEFAULT 'pending_payment',
+    paid_at                DATETIME,
+    created_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at             DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_cert_orders_user ON cert_orders(user_uuid);
@@ -411,6 +612,7 @@ CREATE TABLE IF NOT EXISTS custom_oids (
     name        TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     usage_type  TEXT NOT NULL,
+    asn1_type   TEXT NOT NULL DEFAULT 'UTF8String',
     created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

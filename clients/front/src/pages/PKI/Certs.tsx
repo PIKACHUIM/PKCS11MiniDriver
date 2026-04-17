@@ -2,15 +2,16 @@ import React, { useEffect, useState } from 'react';
 import {
   Table, Button, Space, Tag, Typography, Modal, Form, Input, Select,
   Popconfirm, message, Tooltip, Card, Drawer, Descriptions, Divider,
-  Row, Col, Alert,
+  Row, Col, Alert, DatePicker,
 } from 'antd';
+import dayjs from 'dayjs';
 import {
   PlusOutlined, DeleteOutlined, ReloadOutlined, SafetyCertificateOutlined,
   ImportOutlined, DownloadOutlined, StopOutlined, EyeOutlined,
   KeyOutlined, ExportOutlined,
 } from '@ant-design/icons';
 import {
-  getPKICerts, issuePKICert, importPKICert, deletePKICert, deletePKICertKey,
+  getPKICerts, issuePKICert, selfSignFromCSR, importPKICert, deletePKICert, deletePKICertKey,
   exportPKICert, importPKICertToCard, revokePKICert,
   getLocalCAs, getCSRList, getCards,
 } from '../../api';
@@ -19,7 +20,6 @@ import type {
   LocalCA, CSRRecord, Card as CardType, ExportCertFormat,
 } from '../../types';
 import { useAppStore } from '../../store/appStore';
-import dayjs from 'dayjs';
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -31,15 +31,8 @@ const IMPORT_MODE_OPTIONS = [
   { label: '仅私钥（等待未来关联证书）', value: 'key_only' },
 ];
 
-const VALIDITY_OPTIONS = [
-  { label: '30 天', value: 30 },
-  { label: '90 天', value: 90 },
-  { label: '180 天', value: 180 },
-  { label: '1 年（365 天）', value: 365 },
-  { label: '2 年（730 天）', value: 730 },
-  { label: '3 年（1095 天）', value: 1095 },
-  { label: '5 年（1825 天）', value: 1825 },
-];
+// 自签名标识（CA 选择器中的特殊值）
+const SELF_SIGN_KEY = '__selfsign__';
 
 const CertsPage: React.FC = () => {
   const { darkMode } = useAppStore();
@@ -106,8 +99,33 @@ const CertsPage: React.FC = () => {
     try {
       const values = await issueForm.validateFields();
       setIssuing(true);
-      await issuePKICert(values as IssueCertRequest);
-      message.success('证书已签发');
+
+      const [notBefore, notAfter] = values.date_range;
+      const validityDays = notAfter.diff(notBefore, 'day');
+
+      if (values.ca_uuid === SELF_SIGN_KEY) {
+        // 自签名：用 CSR 的私钥对自身签名
+        await selfSignFromCSR(
+          values.csr_uuid,
+          validityDays,
+          values.remark,
+          notBefore.toISOString(),
+          notAfter.toISOString(),
+        );
+        message.success('自签名证书已生成');
+      } else {
+        // CA 签发
+        await issuePKICert({
+          csr_uuid: values.csr_uuid,
+          ca_uuid: values.ca_uuid,
+          not_before: notBefore.toISOString(),
+          not_after: notAfter.toISOString(),
+          validity_days: validityDays,
+          remark: values.remark,
+        } as IssueCertRequest);
+        message.success('证书已签发');
+      }
+
       setIssueOpen(false);
       issueForm.resetFields();
       load();
@@ -284,18 +302,60 @@ const CertsPage: React.FC = () => {
       {/* 签发证书弹窗 */}
       <Modal title={<Space><PlusOutlined />签发证书</Space>} open={issueOpen}
         onOk={handleIssue} onCancel={() => { setIssueOpen(false); issueForm.resetFields(); }}
-        okText="签发" cancelText="取消" confirmLoading={issuing} width={520}>
-        <Form form={issueForm} layout="vertical" style={{ marginTop: 16 }} initialValues={{ validity_days: 365 }}>
+        okText="签发" cancelText="取消" confirmLoading={issuing} width={540}>
+        <Form form={issueForm} layout="vertical" style={{ marginTop: 16 }}
+          initialValues={{
+            date_range: [dayjs(), dayjs().add(1, 'year')],
+          }}>
           <Form.Item name="csr_uuid" label="选择 CSR" rules={[{ required: true, message: '请选择 CSR' }]}>
             <Select placeholder="选择要签发的 CSR"
               options={csrList.map((c) => ({ value: c.uuid, label: `${c.common_name} (${c.key_type})` }))} />
           </Form.Item>
           <Form.Item name="ca_uuid" label="签发 CA" rules={[{ required: true, message: '请选择 CA' }]}>
-            <Select placeholder="选择签发此证书的 CA"
-              options={cas.filter((c) => !c.revoked && c.has_priv_key).map((c) => ({ value: c.uuid, label: `${c.name} (${c.key_type})` }))} />
+            <Select placeholder="选择签发此证书的 CA，或选择自签名">
+              <Select.Option value={SELF_SIGN_KEY}>
+                <Space>
+                  <Tag color="orange" style={{ margin: 0 }}>自签名</Tag>
+                  使用 CSR 私钥自签（无需 CA）
+                </Space>
+              </Select.Option>
+              {cas.filter((c) => !c.revoked && c.has_priv_key).map((c) => (
+                <Select.Option key={c.uuid} value={c.uuid}>
+                  {c.name} ({c.key_type})
+                </Select.Option>
+              ))}
+            </Select>
           </Form.Item>
-          <Form.Item name="validity_days" label="有效期" rules={[{ required: true }]}>
-            <Select options={VALIDITY_OPTIONS} />
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, cur) => prev.ca_uuid !== cur.ca_uuid}
+          >
+            {({ getFieldValue }) => getFieldValue('ca_uuid') === SELF_SIGN_KEY && (
+              <Alert
+                type="warning" showIcon
+                message="自签名模式：仅支持存储在数据库中的 CSR（含私钥）"
+                style={{ marginBottom: 12 }}
+              />
+            )}
+          </Form.Item>
+          <Form.Item
+            name="date_range"
+            label="有效期（起止日期）"
+            rules={[{ required: true, message: '请选择有效期' }]}
+          >
+            <DatePicker.RangePicker
+              style={{ width: '100%' }}
+              format="YYYY-MM-DD"
+              disabledDate={(d) => d && d.isBefore(dayjs().subtract(1, 'day'))}
+              presets={[
+                { label: '30 天', value: [dayjs(), dayjs().add(30, 'day')] },
+                { label: '90 天', value: [dayjs(), dayjs().add(90, 'day')] },
+                { label: '1 年', value: [dayjs(), dayjs().add(1, 'year')] },
+                { label: '2 年', value: [dayjs(), dayjs().add(2, 'year')] },
+                { label: '3 年', value: [dayjs(), dayjs().add(3, 'year')] },
+                { label: '5 年', value: [dayjs(), dayjs().add(5, 'year')] },
+              ]}
+            />
           </Form.Item>
           <Form.Item name="remark" label="备注">
             <Input placeholder="可选备注" />

@@ -82,9 +82,9 @@ export default function Layout() {
           </nav>
 
           <div className="sidebar-footer">
-            <div className="sidebar-version">
-              <span className="badge badge-blue">v1.1.0</span>
-              <span className="text-muted" style={{ fontSize: '0.75rem' }}>2026-04-15</span>
+          <div className="sidebar-version">
+              <span className="badge badge-blue">v2.0.0</span>
+              <span className="text-muted" style={{ fontSize: '0.75rem' }}>2026-04-17</span>
             </div>
           </div>
         </aside>

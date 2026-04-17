@@ -32,13 +32,28 @@ type IssueRequest struct {
 	DNSNames    []string          // SAN DNS 名称
 	IPAddresses []net.IP          // SAN IP 地址
 	EmailAddrs  []string          // SAN 邮箱
+
+	// 模板约束（可选，签发前验证）
+	IssuanceTmplUUID string // 颁发模板 UUID（用于约束验证）
+
+	// 证书拓展模板（可选，签发时写入扩展）
+	CRLDistPoints  []string // CRL 分发点
+	OCSPServers    []string // OCSP 服务器
+	AIAIssuers     []string // AIA 颁发者
+	CTServers      []string // CT 服务器
+	EVPolicyOID    string   // EV 策略 OID
 }
 
 // IssueResponse 是证书签发响应。
 type IssueResponse struct {
-	CertPEM      string // 签发的证书 PEM
-	PrivateEnc   []byte // 加密的私钥
-	SerialNumber string // 证书序列号（十六进制）
+	CertPEM      string    // 签发的证书 PEM
+	CertDER      []byte    // 签发的证书 DER
+	PrivateEnc   []byte    // 加密的私钥
+	SerialNumber string    // 证书序列号（十六进制）
+	SubjectDN    string    // 主体 DN
+	IssuerDN     string    // 颁发者 DN
+	NotBefore    time.Time // 生效时间
+	NotAfter     time.Time // 失效时间
 }
 
 // IssueCert 使用 CA 签发证书。
@@ -104,6 +119,17 @@ func (s *Service) IssueCert(ctx context.Context, req *IssueRequest) (*IssueRespo
 		template.MaxPathLenZero = req.PathLen == 0
 	}
 
+	// 写入证书拓展模板的扩展信息
+	if len(req.CRLDistPoints) > 0 {
+		template.CRLDistributionPoints = req.CRLDistPoints
+	}
+	if len(req.OCSPServers) > 0 {
+		template.OCSPServer = req.OCSPServers
+	}
+	if len(req.AIAIssuers) > 0 {
+		template.IssuingCertificateURL = req.AIAIssuers
+	}
+
 	// 获取公钥
 	pubKey := publicKey(privKey)
 
@@ -111,6 +137,12 @@ func (s *Service) IssueCert(ctx context.Context, req *IssueRequest) (*IssueRespo
 	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, pubKey, caKey)
 	if err != nil {
 		return nil, fmt.Errorf("签发证书失败: %w", err)
+	}
+
+	// 解析签发后的证书获取完整元数据
+	issuedCert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return nil, fmt.Errorf("解析签发证书失败: %w", err)
 	}
 
 	// 编码为 PEM
@@ -133,8 +165,13 @@ func (s *Service) IssueCert(ctx context.Context, req *IssueRequest) (*IssueRespo
 
 	return &IssueResponse{
 		CertPEM:      string(certPEM),
+		CertDER:      certDER,
 		PrivateEnc:   privEnc,
 		SerialNumber: fmt.Sprintf("%x", serialNumber),
+		SubjectDN:    issuedCert.Subject.String(),
+		IssuerDN:     issuedCert.Issuer.String(),
+		NotBefore:    issuedCert.NotBefore,
+		NotAfter:     issuedCert.NotAfter,
 	}, nil
 }
 

@@ -63,6 +63,10 @@ type Card struct {
 	ExpiresAt *time.Time     `json:"expires_at,omitempty"`
 	CardKeys  []CardKeyEntry `json:"card_keys"` // 存储为 JSON BLOB
 	Remark    string         `json:"remark"`
+	// PIN 安全字段
+	PINRetries      int  `json:"pin_retries"`       // PIN 错误最大次数（默认 3）
+	PINFailedCount  int  `json:"pin_failed_count"`  // 当前连续错误次数
+	PINLocked       bool `json:"pin_locked"`        // PIN 是否被锁定
 	// Cloud Slot 专用字段
 	CloudURL      string `json:"cloud_url,omitempty"`       // servers 服务地址，如 http://localhost:1027
 	CloudCardUUID string `json:"cloud_card_uuid,omitempty"` // 在 servers 中的卡片 UUID

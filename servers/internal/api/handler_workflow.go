@@ -35,6 +35,42 @@ func (s *Server) handleListCertOrders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"orders": orders, "total": total})
 }
 
+func (s *Server) handleGetCertOrder(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromCtx(r.Context())
+	orderUUID := r.PathValue("uuid")
+	order, err := s.workflowSvc.GetOrder(r.Context(), orderUUID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	// 非管理员只能查看自己的订单
+	if order.UserUUID != claims.UserUUID && claims.Role != "admin" && claims.Role != "super_admin" {
+		writeError(w, http.StatusForbidden, "无权查看此订单")
+		return
+	}
+	writeJSON(w, http.StatusOK, order)
+}
+
+func (s *Server) handlePayCertOrder(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromCtx(r.Context())
+	orderUUID := r.PathValue("uuid")
+	if err := s.workflowSvc.PayOrder(r.Context(), orderUUID, claims.UserUUID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "订单已支付"})
+}
+
+func (s *Server) handleCancelCertOrder(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromCtx(r.Context())
+	orderUUID := r.PathValue("uuid")
+	if err := s.workflowSvc.CancelOrder(r.Context(), orderUUID, claims.UserUUID); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "订单已取消"})
+}
+
 func (s *Server) handleCreateCertApplication(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromCtx(r.Context())
 	var app storage.CertApplication

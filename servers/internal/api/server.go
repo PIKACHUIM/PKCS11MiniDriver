@@ -51,6 +51,7 @@ type Server struct {
 	workflowSvc   *workflow.Service
 	userRepo      *storage.UserRepo
 	logRepo       *storage.LogRepo
+	auditLogRepo  *storage.AuditLogRepo // 审计日志
 	paymentSvc    *payment.Service
 	tmplSvc       *template.Service
 	revocationSvc *revocation.Service
@@ -71,6 +72,7 @@ func NewServer(cfg *configs.Config, db *storage.DB, jwtMgr *auth.Manager, svcs *
 		workflowSvc:   svcs.WorkflowSvc,
 		userRepo:      userRepo,
 		logRepo:       logRepo,
+		auditLogRepo:  storage.NewAuditLogRepo(db),
 		paymentSvc:    svcs.PaymentSvc,
 		tmplSvc:       svcs.TmplSvc,
 		revocationSvc: svcs.RevocationSvc,
@@ -169,6 +171,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/certs/{uuid}/renew", s.authMiddleware(s.handleRenewCert))
 	mux.HandleFunc("GET /api/certs/{uuid}/export", s.authMiddleware(s.handleExportCert))
 
+	// 卡片 PIN/PUK/Admin Key 管理（需要认证）
+	mux.HandleFunc("POST /api/cards/{uuid}/verify-pin", s.authMiddleware(s.handleVerifyPIN))
+	mux.HandleFunc("POST /api/cards/{uuid}/unlock-puk", s.authMiddleware(s.handleUnlockWithPUK))
+	mux.HandleFunc("POST /api/cards/{uuid}/reset-admin", s.authMiddleware(s.handleResetWithAdminKey))
+
 	// 密钥生成（需要认证）
 	mux.HandleFunc("POST /api/cards/{uuid}/keygen", s.authMiddleware(s.handleKeyGen))
 
@@ -241,6 +248,16 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/templates/cert-ext", s.adminOnly(s.handleCreateCertExtTemplate))
 	mux.HandleFunc("DELETE /api/templates/cert-ext/{uuid}", s.adminOnly(s.handleDeleteCertExtTemplate))
 
+	// 审计日志查询（管理员）
+	mux.HandleFunc("GET /api/audit-logs", s.adminOnly(s.handleListAuditLogs))
+
+	// 证书申请模板管理（管理员）
+	mux.HandleFunc("GET /api/templates/cert-apply", s.authMiddleware(s.handleListCertApplyTemplates))
+	mux.HandleFunc("POST /api/templates/cert-apply", s.adminOnly(s.handleCreateCertApplyTemplate))
+	mux.HandleFunc("GET /api/templates/cert-apply/{uuid}", s.authMiddleware(s.handleGetCertApplyTemplate))
+	mux.HandleFunc("PUT /api/templates/cert-apply/{uuid}", s.adminOnly(s.handleUpdateCertApplyTemplate))
+	mux.HandleFunc("DELETE /api/templates/cert-apply/{uuid}", s.adminOnly(s.handleDeleteCertApplyTemplate))
+
 	// 存储区域管理（管理员）
 	mux.HandleFunc("GET /api/storage-zones", s.authMiddleware(s.handleListStorageZones))
 	mux.HandleFunc("POST /api/storage-zones", s.adminOnly(s.handleCreateStorageZone))
@@ -275,15 +292,22 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// 证书订单与申请（需要认证）
 	mux.HandleFunc("POST /api/cert-orders", s.writeOnly(s.handleCreateCertOrder))
 	mux.HandleFunc("GET /api/cert-orders", s.authMiddleware(s.handleListCertOrders))
+	mux.HandleFunc("GET /api/cert-orders/{uuid}", s.authMiddleware(s.handleGetCertOrder))
+	mux.HandleFunc("POST /api/cert-orders/{uuid}/pay", s.writeOnly(s.handlePayCertOrder))
+	mux.HandleFunc("POST /api/cert-orders/{uuid}/cancel", s.writeOnly(s.handleCancelCertOrder))
 	mux.HandleFunc("POST /api/cert-applications", s.writeOnly(s.handleCreateCertApplication))
 	mux.HandleFunc("GET /api/cert-applications", s.authMiddleware(s.handleListCertApplications))
-	mux.HandleFunc("POST /api/cert-applications/{uuid}/approve", s.adminOnly(s.handleApproveCertApplication))
-	mux.HandleFunc("POST /api/cert-applications/{uuid}/reject", s.adminOnly(s.handleRejectCertApplication))
+	mux.HandleFunc("POST /api/cert-applications/{uuid}/approve", s.operatorOnly(s.handleApproveCertApplication))
+	mux.HandleFunc("POST /api/cert-applications/{uuid}/reject", s.operatorOnly(s.handleRejectCertApplication))
 
 	// 公开服务路由（无需认证，供外部客户端访问）
 	mux.HandleFunc("GET /crl/{caUUID}", s.handlePublicCRL)
 	mux.HandleFunc("POST /ocsp/{caUUID}", s.handlePublicOCSP)
 	mux.HandleFunc("GET /ca/{caUUID}", s.handlePublicCAIssuer)
+	// 自定义路径的吊销服务路由（通过 revocation_services 表配置）
+	mux.HandleFunc("GET /pki/crl/{path}", s.handlePublicCRLByPath)
+	mux.HandleFunc("POST /pki/ocsp/{path}", s.handlePublicOCSPByPath)
+	mux.HandleFunc("GET /pki/ca/{path}", s.handlePublicCAIssuerByPath)
 	mux.HandleFunc("GET /acme/{path}/directory", s.handleACMEDirectory)
 	mux.HandleFunc("HEAD /acme/{path}/new-nonce", s.handleACMENewNonce)
 	// ACME 完整协议路由
@@ -356,11 +380,11 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// adminOnly 仅允许 admin 角色访问的中间件（需先经过 authMiddleware）。
+// adminOnly 仅允许 super_admin 或 admin 角色访问的中间件。
 func (s *Server) adminOnly(next http.HandlerFunc) http.HandlerFunc {
 	return s.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		claims := claimsFromCtx(r.Context())
-		if claims.Role != "admin" {
+		if !auth.IsAdmin(claims.Role) {
 			writeError(w, http.StatusForbidden, "需要管理员权限")
 			return
 		}
@@ -368,11 +392,23 @@ func (s *Server) adminOnly(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
-// writeOnly 仅允许 admin 或 user 角色访问（readonly 被拒绝），需先经过 authMiddleware。
+// operatorOnly 仅允许 super_admin/admin/operator 角色访问的中间件。
+func (s *Server) operatorOnly(next http.HandlerFunc) http.HandlerFunc {
+	return s.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		claims := claimsFromCtx(r.Context())
+		if !auth.IsOperatorOrAbove(claims.Role) {
+			writeError(w, http.StatusForbidden, "需要操作员或以上权限")
+			return
+		}
+		next(w, r)
+	})
+}
+
+// writeOnly 仅允许非 readonly 角色访问（readonly 被拒绝），需先经过 authMiddleware。
 func (s *Server) writeOnly(next http.HandlerFunc) http.HandlerFunc {
 	return s.authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		claims := claimsFromCtx(r.Context())
-		if claims.Role == "readonly" {
+		if !auth.CanWrite(claims.Role) {
 			writeError(w, http.StatusForbidden, "只读用户无权执行此操作")
 			return
 		}

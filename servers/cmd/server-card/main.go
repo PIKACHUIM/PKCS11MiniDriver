@@ -38,10 +38,10 @@ func main() {
 	// 初始化日志
 	initLogger(cfg.Log.Level)
 
-	slog.Info("servers 启动中", "addr", cfg.API.Addr(), "db", cfg.Database.Path)
+	slog.Info("servers 启动中", "addr", cfg.API.Addr(), "db", cfg.Database.Path, "db_url", cfg.Database.URL != "")
 
 	// 初始化数据库
-	db, err := storage.Open(cfg.Database.Path)
+	db, err := storage.Open(cfg.Database.Path, cfg.Database.URL)
 	if err != nil {
 		slog.Error("初始化数据库失败", "error", err)
 		os.Exit(1)

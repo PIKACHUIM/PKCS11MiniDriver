@@ -194,7 +194,7 @@ const CertsPage: React.FC = () => {
               </Tag>
             </Descriptions.Item>
             <Descriptions.Item label="密钥类型">{selectedCert.key_type}</Descriptions.Item>
-            <Descriptions.Item label="Slot 类型">{selectedCert.slot_type}</Descriptions.Item>
+            <Descriptions.Item label="Slot">{selectedCert.slot_type}</Descriptions.Item>
             <Descriptions.Item label="备注">{selectedCert.remark || '-'}</Descriptions.Item>
             <Descriptions.Item label="创建时间">
               {dayjs(selectedCert.created_at).format('YYYY-MM-DD HH:mm:ss')}

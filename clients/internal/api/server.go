@@ -183,6 +183,10 @@ func (s *Server) registerRoutes() {
 	// ---- 应用指标 ----
 	s.mux.HandleFunc("GET /metrics", s.metrics.Handler())
 
+	// ---- 云端同步 ----
+	s.mux.HandleFunc("POST /api/cloud/sync", s.handleCloudSync)
+	s.mux.HandleFunc("GET /api/cloud/status", s.handleCloudStatus)
+
 	// ---- 前端管理界面（静态文件）----
 	// 所有非 /api/ 路径的请求都由前端 SPA 处理
 	s.mux.Handle("/", ui.Handler())

@@ -27,7 +27,7 @@ func (s *Service) CreateOrder(ctx context.Context, o *storage.CertOrder) error {
 	o.CreatedAt = time.Now()
 	o.UpdatedAt = time.Now()
 	if o.Status == "" {
-		o.Status = storage.OrderStatusPending
+		o.Status = storage.CertOrderPendingPayment
 	}
 
 	// 如果有定价，检查用户余额
@@ -307,5 +307,98 @@ func (s *Service) RejectApplication(ctx context.Context, appUUID, adminUUID, rea
 		}
 	}
 
+	return nil
+}
+
+// PayOrder 标记订单为已支付（模拟支付，实际支付由 payment 模块处理）。
+func (s *Service) PayOrder(ctx context.Context, orderUUID, userUUID string) error {
+	now := time.Now()
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE cert_orders SET status = ?, paid_at = ?, updated_at = ? WHERE uuid = ? AND user_uuid = ? AND status = ?`,
+		string(storage.CertOrderPaid), now, now, orderUUID, userUUID, string(storage.CertOrderPendingPayment),
+	)
+	if err != nil {
+		return fmt.Errorf("更新订单状态失败: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("订单不存在或状态不允许支付")
+	}
+	return nil
+}
+
+// SubmitCertApplication 提交证书申请（订单状态 paid → applying/reviewing）。
+func (s *Service) SubmitCertApplication(ctx context.Context, app *storage.CertApplication, requireApproval bool) error {
+	now := time.Now()
+
+	newStatus := string(storage.CertOrderApplying)
+	if requireApproval {
+		newStatus = string(storage.CertOrderReviewing)
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE cert_orders SET status = ?, updated_at = ? WHERE uuid = ? AND status = ?`,
+		newStatus, now, app.OrderUUID, string(storage.CertOrderPaid),
+	)
+	if err != nil {
+		return fmt.Errorf("更新订单状态失败: %w", err)
+	}
+
+	return s.CreateApplication(ctx, app)
+}
+
+// CancelOrder 取消订单（解冻金额）。
+func (s *Service) CancelOrder(ctx context.Context, orderUUID, userUUID string) error {
+	now := time.Now()
+
+	order, err := s.GetOrder(ctx, orderUUID)
+	if err != nil {
+		return err
+	}
+	if order.UserUUID != userUUID {
+		return fmt.Errorf("无权取消此订单")
+	}
+	if order.Status == storage.CertOrderCompleted || order.Status == storage.CertOrderCancelled {
+		return fmt.Errorf("订单状态不允许取消: %s", order.Status)
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE cert_orders SET status = ?, updated_at = ? WHERE uuid = ?`,
+		string(storage.CertOrderCancelled), now, orderUUID,
+	)
+	if err != nil {
+		return fmt.Errorf("取消订单失败: %w", err)
+	}
+
+	if order.FrozenCents > 0 {
+		s.db.ExecContext(ctx, //nolint:errcheck
+			`UPDATE user_balances SET available_cents = available_cents + ?, frozen_cents = frozen_cents - ? WHERE user_uuid = ?`,
+			order.FrozenCents, order.FrozenCents, userUUID,
+		)
+		refundUUID := uuid.New().String()
+		s.db.ExecContext(ctx, //nolint:errcheck
+			`INSERT INTO consume_records (uuid, user_uuid, order_no, consume_type, amount_cents, remark, created_at)
+			 VALUES (?, ?, ?, 'refund', ?, '订单取消退款', ?)`,
+			refundUUID, userUUID, orderUUID, -order.FrozenCents, now,
+		)
+	}
+	return nil
+}
+
+// CompleteOrder 完成订单（签发成功后调用）。
+func (s *Service) CompleteOrder(ctx context.Context, orderUUID, certUUID string) error {
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE cert_orders SET status = ?, updated_at = ? WHERE uuid = ?`,
+		string(storage.CertOrderCompleted), now, orderUUID,
+	)
+	if err != nil {
+		return fmt.Errorf("完成订单失败: %w", err)
+	}
+	if certUUID != "" {
+		s.db.ExecContext(ctx, //nolint:errcheck
+			`UPDATE cert_applications SET cert_uuid = ?, status = 'approved', updated_at = ? WHERE order_uuid = ?`,
+			certUUID, now, orderUUID,
+		)
+	}
 	return nil
 }

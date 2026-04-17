@@ -21,6 +21,8 @@ const Payment = lazy(() => import('./pages/Payment'));
 const Identity = lazy(() => import('./pages/Identity'));
 const CertOrders = lazy(() => import('./pages/CertOrders'));
 const CTRecords = lazy(() => import('./pages/CTRecords'));
+const AuditLogs = lazy(() => import('./pages/AuditLogs'));
+const CertApplyTemplates = lazy(() => import('./pages/CertApplyTemplates'));
 const Settings = lazy(() => import('./pages/Settings'));
 const Logs = lazy(() => import('./pages/Logs'));
 const Profile = lazy(() => import('./pages/Profile'));
@@ -84,6 +86,8 @@ const App: React.FC = () => {
               <Route path="/templates" element={<S><Templates /></S>} />
               <Route path="/users" element={<S><Users /></S>} />
               <Route path="/ct-records" element={<S><CTRecords /></S>} />
+              <Route path="/audit-logs" element={<S><AuditLogs /></S>} />
+              <Route path="/cert-apply-templates" element={<S><CertApplyTemplates /></S>} />
               {/* 系统 */}
               <Route path="/logs" element={<S><Logs /></S>} />
               <Route path="/settings" element={<S><Settings /></S>} />

@@ -18,8 +18,16 @@ const { Option } = Select;
 
 const KEY_TYPES = ['ec256', 'ec384', 'rsa2048', 'rsa4096'];
 
-const orderStatusColor: Record<string, string> = { pending: 'orange', paid: 'blue', issued: 'green', rejected: 'red' };
-const orderStatusText: Record<string, string> = { pending: '待支付', paid: '已支付', issued: '已签发', rejected: '已拒绝' };
+const orderStatusColor: Record<string, string> = {
+  pending_payment: 'orange', paid: 'blue', applying: 'cyan',
+  reviewing: 'purple', issuing: 'geekblue', completed: 'green',
+  rejected: 'red', cancelled: 'default', refunded: 'volcano',
+};
+const orderStatusText: Record<string, string> = {
+  pending_payment: '待支付', paid: '已支付', applying: '申请中',
+  reviewing: '审批中', issuing: '签发中', completed: '已完成',
+  rejected: '已拒绝', cancelled: '已取消', refunded: '已退款',
+};
 const appStatusColor: Record<string, string> = { pending: 'orange', approved: 'green', rejected: 'red' };
 const appStatusText: Record<string, string> = { pending: '待审批', approved: '已通过', rejected: '已拒绝' };
 

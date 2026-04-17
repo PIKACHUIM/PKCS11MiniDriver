@@ -77,4 +77,16 @@ char *b64_encode(const uint8_t *data, size_t len);
  */
 uint8_t *b64_decode(const char *s, size_t *out_len);
 
+/* ---- 兼容别名 ---- */
+
+/** base64_encode / base64_decode 是 b64_encode / b64_decode 的别名 */
+#define base64_encode(data, len)   b64_encode((data), (len))
+#define base64_decode(s, out_len)  b64_decode((s), (out_len))
+
+/**
+ * json_get_int - 从 JSON 字符串中提取整数字段值，字段不存在时返回默认值。
+ * 例如：json_get_int("{\"major\":2}", "major", 0) → 2
+ */
+int json_get_int(const char *json, const char *key, int default_val);
+
 #endif /* IPC_JSON_H */

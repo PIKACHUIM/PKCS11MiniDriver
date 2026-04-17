@@ -225,3 +225,15 @@ uint8_t *b64_decode(const char *s, size_t *out_len)
     out[j] = '\0';
     return out;
 }
+
+/* ================================================================
+ * 兼容函数
+ * ================================================================ */
+
+int json_get_int(const char *json, const char *key, int default_val)
+{
+    uint32_t val = 0;
+    if (json_get_uint32(json, key, &val) == 0)
+        return (int)val;
+    return default_val;
+}

@@ -36,11 +36,11 @@ func (s *Service) CreateIssuanceTemplate(ctx context.Context, t *storage.Issuanc
 
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO issuance_templates (uuid, name, is_ca, path_len, valid_days, allowed_key_types, allowed_ca_uuids,
-		 subject_tmpl_uuid, extension_tmpl_uuid, key_usage_tmpl_uuid, key_storage_tmpl_uuid,
+		 subject_tmpl_uuid, extension_tmpl_uuid, key_usage_tmpl_uuid, key_storage_tmpl_uuid, cert_ext_tmpl_uuid,
 		 price_cents, stock, category, enabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.UUID, t.Name, boolToInt(t.IsCA), t.PathLen, t.ValidDays, t.AllowedKeyTypes, t.AllowedCAUUIDs,
-		t.SubjectTmplUUID, t.ExtensionTmplUUID, t.KeyUsageTmplUUID, t.KeyStorageTmplUUID,
+		t.SubjectTmplUUID, t.ExtensionTmplUUID, t.KeyUsageTmplUUID, t.KeyStorageTmplUUID, t.CertExtTmplUUID,
 		t.PriceCents, t.Stock, t.Category, boolToInt(t.Enabled), t.CreatedAt, t.UpdatedAt,
 	)
 	return err
@@ -52,11 +52,11 @@ func (s *Service) GetIssuanceTemplate(ctx context.Context, tmplUUID string) (*st
 	var isCA, enabled int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT uuid, name, is_ca, path_len, valid_days, allowed_key_types, allowed_ca_uuids,
-		 subject_tmpl_uuid, extension_tmpl_uuid, key_usage_tmpl_uuid, key_storage_tmpl_uuid,
+		 subject_tmpl_uuid, extension_tmpl_uuid, key_usage_tmpl_uuid, key_storage_tmpl_uuid, cert_ext_tmpl_uuid,
 		 price_cents, stock, category, enabled, created_at, updated_at
 		 FROM issuance_templates WHERE uuid = ?`, tmplUUID,
 	).Scan(&t.UUID, &t.Name, &isCA, &t.PathLen, &t.ValidDays, &t.AllowedKeyTypes, &t.AllowedCAUUIDs,
-		&t.SubjectTmplUUID, &t.ExtensionTmplUUID, &t.KeyUsageTmplUUID, &t.KeyStorageTmplUUID,
+		&t.SubjectTmplUUID, &t.ExtensionTmplUUID, &t.KeyUsageTmplUUID, &t.KeyStorageTmplUUID, &t.CertExtTmplUUID,
 		&t.PriceCents, &t.Stock, &t.Category, &enabled, &t.CreatedAt, &t.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("颁发模板不存在: %s", tmplUUID)
@@ -69,7 +69,7 @@ func (s *Service) GetIssuanceTemplate(ctx context.Context, tmplUUID string) (*st
 // ListIssuanceTemplates 查询所有颁发模板。
 func (s *Service) ListIssuanceTemplates(ctx context.Context, category string, enabledOnly bool) ([]*storage.IssuanceTemplate, error) {
 	query := `SELECT uuid, name, is_ca, path_len, valid_days, allowed_key_types, allowed_ca_uuids,
-		 subject_tmpl_uuid, extension_tmpl_uuid, key_usage_tmpl_uuid, key_storage_tmpl_uuid,
+		 subject_tmpl_uuid, extension_tmpl_uuid, key_usage_tmpl_uuid, key_storage_tmpl_uuid, cert_ext_tmpl_uuid,
 		 price_cents, stock, category, enabled, created_at, updated_at
 		 FROM issuance_templates WHERE 1=1`
 	var args []interface{}
@@ -94,7 +94,7 @@ func (s *Service) ListIssuanceTemplates(ctx context.Context, category string, en
 		t := &storage.IssuanceTemplate{}
 		var isCA, enabled int
 		if err := rows.Scan(&t.UUID, &t.Name, &isCA, &t.PathLen, &t.ValidDays, &t.AllowedKeyTypes, &t.AllowedCAUUIDs,
-			&t.SubjectTmplUUID, &t.ExtensionTmplUUID, &t.KeyUsageTmplUUID, &t.KeyStorageTmplUUID,
+			&t.SubjectTmplUUID, &t.ExtensionTmplUUID, &t.KeyUsageTmplUUID, &t.KeyStorageTmplUUID, &t.CertExtTmplUUID,
 			&t.PriceCents, &t.Stock, &t.Category, &enabled, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -111,10 +111,10 @@ func (s *Service) UpdateIssuanceTemplate(ctx context.Context, t *storage.Issuanc
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE issuance_templates SET name = ?, is_ca = ?, path_len = ?, valid_days = ?, allowed_key_types = ?,
 		 allowed_ca_uuids = ?, subject_tmpl_uuid = ?, extension_tmpl_uuid = ?, key_usage_tmpl_uuid = ?,
-		 key_storage_tmpl_uuid = ?, price_cents = ?, stock = ?, category = ?, enabled = ?, updated_at = ?
+		 key_storage_tmpl_uuid = ?, cert_ext_tmpl_uuid = ?, price_cents = ?, stock = ?, category = ?, enabled = ?, updated_at = ?
 		 WHERE uuid = ?`,
 		t.Name, boolToInt(t.IsCA), t.PathLen, t.ValidDays, t.AllowedKeyTypes, t.AllowedCAUUIDs,
-		t.SubjectTmplUUID, t.ExtensionTmplUUID, t.KeyUsageTmplUUID, t.KeyStorageTmplUUID,
+		t.SubjectTmplUUID, t.ExtensionTmplUUID, t.KeyUsageTmplUUID, t.KeyStorageTmplUUID, t.CertExtTmplUUID,
 		t.PriceCents, t.Stock, t.Category, boolToInt(t.Enabled), t.UpdatedAt, t.UUID,
 	)
 	return err
@@ -259,23 +259,39 @@ func (s *Service) DeleteKeyUsageTemplate(ctx context.Context, tmplUUID string) e
 
 // ---- 证书扩展模板 CRUD ----
 
-// CreateCertExtTemplate 创建证书扩展模板。
+// CreateCertExtTemplate 创建证书拓展模板。
 func (s *Service) CreateCertExtTemplate(ctx context.Context, t *storage.CertExtTemplate) error {
 	t.UUID = uuid.New().String()
 	t.CreatedAt = time.Now()
 	t.UpdatedAt = time.Now()
+	if t.CRLDistPoints == "" {
+		t.CRLDistPoints = "[]"
+	}
+	if t.OCSPServers == "" {
+		t.OCSPServers = "[]"
+	}
+	if t.AIAIssuers == "" {
+		t.AIAIssuers = "[]"
+	}
+	if t.CTServers == "" {
+		t.CTServers = "[]"
+	}
+	if t.ASN1Extensions == "" {
+		t.ASN1Extensions = "[]"
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO cert_ext_templates (uuid, name, crl_dist_points, ocsp_servers, aia_issuers, ct_servers, ev_policy_oid, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.UUID, t.Name, t.CRLDistPoints, t.OCSPServers, t.AIAIssuers, t.CTServers, t.EVPolicyOID, t.CreatedAt, t.UpdatedAt,
+		`INSERT INTO cert_ext_templates (uuid, name, crl_dist_points, ocsp_servers, aia_issuers, ct_servers, ev_policy_oid, netscape_config, csp_config, asn1_extensions, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.UUID, t.Name, t.CRLDistPoints, t.OCSPServers, t.AIAIssuers, t.CTServers, t.EVPolicyOID,
+		t.NetscapeConfig, t.CSPConfig, t.ASN1Extensions, t.CreatedAt, t.UpdatedAt,
 	)
 	return err
 }
 
-// ListCertExtTemplates 查询所有证书扩展模板。
+// ListCertExtTemplates 查询所有证书拓展模板。
 func (s *Service) ListCertExtTemplates(ctx context.Context) ([]*storage.CertExtTemplate, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT uuid, name, crl_dist_points, ocsp_servers, aia_issuers, ct_servers, ev_policy_oid, created_at, updated_at
+		`SELECT uuid, name, crl_dist_points, ocsp_servers, aia_issuers, ct_servers, ev_policy_oid, netscape_config, csp_config, asn1_extensions, created_at, updated_at
 		 FROM cert_ext_templates ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -286,7 +302,8 @@ func (s *Service) ListCertExtTemplates(ctx context.Context) ([]*storage.CertExtT
 	var templates []*storage.CertExtTemplate
 	for rows.Next() {
 		t := &storage.CertExtTemplate{}
-		if err := rows.Scan(&t.UUID, &t.Name, &t.CRLDistPoints, &t.OCSPServers, &t.AIAIssuers, &t.CTServers, &t.EVPolicyOID, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.UUID, &t.Name, &t.CRLDistPoints, &t.OCSPServers, &t.AIAIssuers, &t.CTServers, &t.EVPolicyOID,
+			&t.NetscapeConfig, &t.CSPConfig, &t.ASN1Extensions, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		templates = append(templates, t)

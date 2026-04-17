@@ -13,7 +13,7 @@ import (
 // setupServerDB 创建内存 SQLite 测试数据库。
 func setupServerDB(t *testing.T) (*storage.DB, func()) {
 	t.Helper()
-	db, err := storage.Open(":memory:")
+	db, err := storage.Open(":memory:", "")
 	if err != nil {
 		t.Fatalf("打开内存数据库失败: %v", err)
 	}

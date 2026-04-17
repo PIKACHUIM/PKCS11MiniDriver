@@ -191,7 +191,7 @@ const LocalCAPage: React.FC = () => {
           <Form.Item name="name" label="CA 名称" rules={[{ required: true }]}>
             <Input placeholder="My Root CA" />
           </Form.Item>
-          <Divider orientation="left" style={{ fontSize: 13 }}>主体信息</Divider>
+          <Divider titlePlacement="left" style={{ fontSize: 13 }}>主体信息</Divider>
           <Row gutter={16}>
             <Col span={12}>
               <Form.Item name="common_name" label="通用名称 (CN)" rules={[{ required: true }]}>

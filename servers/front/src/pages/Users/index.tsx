@@ -67,13 +67,15 @@ const Users: React.FC = () => {
     },
     { title: '邮箱', dataIndex: 'email', render: (v: string) => <Text type="secondary">{v || '-'}</Text> },
     {
-      title: '角色', dataIndex: 'user_type', width: 140,
+      title: '角色', dataIndex: 'user_type', width: 160,
       render: (v: string, record: User) => (
-        <Select size="small" value={v || 'user'} style={{ width: 120 }}
-          onChange={(role) => updateUserRole(record.uuid, role as 'admin' | 'user' | 'readonly').then(() => { message.success('角色已更新'); load(); }).catch((e: any) => message.error(e.message))}
+        <Select size="small" value={v || 'user'} style={{ width: 140 }}
+          onChange={(role) => updateUserRole(record.uuid, role as any).then(() => { message.success('角色已更新'); load(); }).catch((e: any) => message.error(e.message))}
           onClick={(e) => e.stopPropagation()}>
+          <Option value="super_admin"><Tag color="red" style={{ margin: 0 }}>超级管理员</Tag></Option>
           <Option value="admin"><Tag color="gold" style={{ margin: 0 }}>管理员</Tag></Option>
-          <Option value="user"><Tag color="blue" style={{ margin: 0 }}>普通用户</Tag></Option>
+          <Option value="operator"><Tag color="blue" style={{ margin: 0 }}>操作员</Tag></Option>
+          <Option value="user"><Tag color="green" style={{ margin: 0 }}>普通用户</Tag></Option>
           <Option value="readonly"><Tag color="default" style={{ margin: 0 }}>只读</Tag></Option>
         </Select>
       ),
@@ -124,7 +126,13 @@ const Users: React.FC = () => {
           <Form.Item name="display_name" label="显示名称" rules={[{ required: true }]}><Input placeholder="例如：张三" /></Form.Item>
           <Form.Item name="email" label="邮箱" rules={[{ type: 'email', message: '请输入有效邮箱' }]}><Input placeholder="user@example.com" /></Form.Item>
           <Form.Item name="user_type" label="用户类型" initialValue="user">
-            <Select options={[{ value: 'user', label: '普通用户' }, { value: 'admin', label: '管理员' }, { value: 'readonly', label: '只读用户' }]} />
+            <Select options={[
+              { value: 'super_admin', label: '超级管理员' },
+              { value: 'admin', label: '管理员' },
+              { value: 'operator', label: '操作员' },
+              { value: 'user', label: '普通用户' },
+              { value: 'readonly', label: '只读用户' },
+            ]} />
           </Form.Item>
           {!editUser && (
             <Form.Item name="password" label="密码" rules={[{ required: true }, { min: 8, message: '密码至少8位' }]}>

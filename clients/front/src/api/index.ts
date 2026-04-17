@@ -40,6 +40,18 @@ http.interceptors.response.use(
     return res;
   },
   (err) => {
+    // 401 未授权：清除本地 token 并跳转登录页
+    if (err.response?.status === 401) {
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('auth_user_uuid');
+      localStorage.removeItem('auth_username');
+      localStorage.removeItem('auth_role');
+      // 避免在登录页重复跳转
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login';
+      }
+      return Promise.reject(new Error('登录已过期，请重新登录'));
+    }
     const msg = err.response?.data?.message || err.message || '请求失败';
     return Promise.reject(new Error(msg));
   }
@@ -196,8 +208,14 @@ export const getPKICerts = (params?: { page?: number; page_size?: number }) =>
 export const issuePKICert = (data: IssueCertRequest) =>
   http.post<PKICert>('/api/pki/certs/issue', data).then((r) => r.data);
 
-export const selfSignFromCSR = (csrUUID: string, validityDays: number, remark?: string) =>
-  http.post<PKICert>('/api/pki/certs/selfsign', { csr_uuid: csrUUID, validity_days: validityDays, remark }).then((r) => r.data);
+export const selfSignFromCSR = (csrUUID: string, validityDays: number, remark?: string, notBefore?: string, notAfter?: string) =>
+  http.post<PKICert>('/api/pki/certs/selfsign', {
+    csr_uuid: csrUUID,
+    validity_days: validityDays,
+    not_before: notBefore,
+    not_after: notAfter,
+    remark,
+  }).then((r) => r.data);
 
 export const importPKICert = (data: ImportCertRequest) =>
   http.post<{ cert: PKICert; key_matched: boolean }>('/api/pki/certs/import', data).then((r) => r.data);

@@ -131,9 +131,9 @@ func defaultConfigPath() string {
 	return filepath.Join(userDataDir(), "config.yaml")
 }
 
-// defaultDBPath 返回默认数据库文件路径。
+// defaultDBPath 返回默认数据库文件路径（相对于程序运行目录）。
 func defaultDBPath() string {
-	return filepath.Join(userDataDir(), "clients.db")
+	return filepath.Join("data", "clients.db")
 }
 
 // userDataDir 返回用户数据目录。

@@ -4,6 +4,7 @@ package configs
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 )
 
@@ -31,8 +32,12 @@ func (c *APIConfig) Addr() string {
 
 // DatabaseConfig 是数据库配置。
 type DatabaseConfig struct {
-	// Path 是 SQLite 数据库文件路径（生产环境可替换为 PostgreSQL DSN）
+	// Path 是 SQLite 数据库文件路径（默认使用 SQLite）
 	Path string
+	// URL 是数据库连接 URL（可选）。
+	// 格式：postgres://user:pass@host/db 或 mysql://user:pass@host/db
+	// 未设置时默认使用 SQLite（Path 字段）
+	URL string
 }
 
 // JWTConfig 是 JWT 配置。
@@ -61,6 +66,7 @@ func Load() *Config {
 		},
 		Database: DatabaseConfig{
 			Path: getEnv("SERVER_CARD_DB_PATH", defaultDBPath()),
+			URL:  getEnv("DATABASE_URL", ""),
 		},
 		JWT: JWTConfig{
 			Secret:      getEnv("SERVER_CARD_JWT_SECRET", "change-me-in-production-please!!"),
@@ -147,13 +153,13 @@ func trimSpace(s string) string {
 	return s
 }
 
-// defaultDBPath 返回默认数据库路径。
+// defaultDBPath 返回默认数据库路径（程序所在目录的 data 子目录）。
 func defaultDBPath() string {
-	home, _ := os.UserHomeDir()
-	if home == "" {
-		home = "."
+	exe, err := os.Executable()
+	if err != nil {
+		return "data/server.db"
 	}
-	return home + "/.config/globaltrusts/servers/server.db"
+	return filepath.Join(filepath.Dir(exe), "data", "server.db")
 }
 
 func getEnv(key, defaultVal string) string {

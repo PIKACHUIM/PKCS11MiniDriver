@@ -18,7 +18,7 @@ const { Text } = Typography;
 
 // Manager 菜单项（只管理本地 client-card :1026 的功能）
 const menuItems = [
-  // 概览：用 type:'group' 包裹，避免与 SubMenu 混排导致 rawData.some 报错
+  // 概览
   {
     type: 'group' as const,
     label: '概览',
@@ -29,12 +29,10 @@ const menuItems = [
   {
     key: 'group-local',
     icon: <CreditCardOutlined />,
-    label: '本地管理',
+    label: '智能卡管理',
     children: [
-      { key: '/users', icon: <UserOutlined />, label: '用户管理' },
-      { key: '/cards', icon: <CreditCardOutlined />, label: '卡片管理' },
+      { key: '/cards', icon: <CreditCardOutlined />, label: '卡片列表' },
       { key: '/certs', icon: <SafetyCertificateOutlined />, label: '证书管理' },
-      { key: '/totp', icon: <ClockCircleOutlined />, label: 'TOTP验证' },
     ],
   },
   {
@@ -43,9 +41,24 @@ const menuItems = [
     label: 'PKI 工具',
     children: [
       { key: '/pki/csr', icon: <KeyOutlined />, label: 'CSR 管理' },
-      { key: '/pki/ca', icon: <BankOutlined />, label: 'CA 管理' },
-      { key: '/pki/certs', icon: <FileDoneOutlined />, label: '证书管理' },
-      { key: '/pki/selfsign', icon: <SafetyCertificateOutlined />, label: '自签名证书' },
+      { key: '/pki/ca', icon: <BankOutlined />, label: '本地 CA 管理' },
+      { key: '/pki/certs', icon: <FileDoneOutlined />, label: '证书签发' },
+    ],
+  },
+  {
+    key: 'group-security',
+    icon: <ClockCircleOutlined />,
+    label: '安全凭据',
+    children: [
+      { key: '/totp', icon: <ClockCircleOutlined />, label: 'TOTP 验证' },
+    ],
+  },
+  {
+    key: 'group-cloud',
+    icon: <ApiOutlined />,
+    label: '云端功能',
+    children: [
+      { key: '/users', icon: <UserOutlined />, label: '云端账号' },
     ],
   },
   {

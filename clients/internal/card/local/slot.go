@@ -28,10 +28,11 @@ type Slot struct {
 	slotID   pkcs11types.SlotID
 	card     *storage.Card
 	certRepo *storage.CertRepo
+	cardRepo *storage.CardRepo // 用于更新 PIN 状态
 
 	// 登录状态
 	loggedIn   bool
-	masterKey  []byte // 解密后的卡片主密钥（登录后有效）
+	masterKey  []byte // 解密后的卡片主密鑰（登录后有效）
 
 	// 对象缓存：handle -> certificate
 	objects map[pkcs11types.ObjectHandle]*storage.Certificate
@@ -47,6 +48,13 @@ func New(slotID pkcs11types.SlotID, card *storage.Card, certRepo *storage.CertRe
 		objects:    make(map[pkcs11types.ObjectHandle]*storage.Certificate),
 		nextHandle: 1,
 	}
+}
+
+// NewWithCardRepo 创建本地 Slot 实例（含 CardRepo，支持 PIN 锁定）。
+func NewWithCardRepo(slotID pkcs11types.SlotID, card *storage.Card, certRepo *storage.CertRepo, cardRepo *storage.CardRepo) *Slot {
+	s := New(slotID, card, certRepo)
+	s.cardRepo = cardRepo
+	return s
 }
 
 // SlotID 返回 Slot ID。
@@ -131,7 +139,7 @@ func (s *Slot) Mechanisms() []pkcs11types.MechanismType {
 	}
 }
 
-// Login 验证卡片密码，解密主密钥。
+// Login 验证卡片密码，解密主密鑰。
 // pin 是用户输入的密码（用户密码或卡片密码）。
 func (s *Slot) Login(ctx context.Context, userType pkcs11types.UserType, pin string) error {
 	s.mu.Lock()
@@ -141,9 +149,38 @@ func (s *Slot) Login(ctx context.Context, userType pkcs11types.UserType, pin str
 		return fmt.Errorf("%w", pkcs11types.CKR_USER_ALREADY_LOGGED_IN)
 	}
 
+	// 检查 PIN 是否被锁定
+	if s.card.PINLocked {
+		return fmt.Errorf("%w: PIN 已锁定，请使用 PUK 解锁", pkcs11types.CKR_PIN_LOCKED)
+	}
+
 	masterKey, err := s.unlockMasterKey(pin)
 	if err != nil {
+		// PIN 错误，递增失败次数
+		if s.cardRepo != nil {
+			maxRetries := s.card.PINRetries
+			if maxRetries <= 0 {
+				maxRetries = 3
+			}
+			newFailedCount := s.card.PINFailedCount + 1
+			locked := newFailedCount >= maxRetries
+			s.card.PINFailedCount = newFailedCount
+			s.card.PINLocked = locked
+			_ = s.cardRepo.Update(ctx, s.card)
+			if locked {
+				return fmt.Errorf("%w: PIN 错误次数过多，已锁定", pkcs11types.CKR_PIN_LOCKED)
+			}
+			remaining := maxRetries - newFailedCount
+			return fmt.Errorf("%w: PIN 错误，剩余 %d 次", pkcs11types.CKR_PIN_INCORRECT, remaining)
+		}
 		return fmt.Errorf("%w: %v", pkcs11types.CKR_PIN_INCORRECT, err)
+	}
+
+	// PIN 正确，重置失败次数
+	if s.card.PINFailedCount > 0 && s.cardRepo != nil {
+		s.card.PINFailedCount = 0
+		s.card.PINLocked = false
+		_ = s.cardRepo.Update(ctx, s.card)
 	}
 
 	s.masterKey = masterKey
