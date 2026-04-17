@@ -174,11 +174,15 @@ func (s *Service) CreateExtensionTemplate(ctx context.Context, t *storage.Extens
 	t.UUID = uuid.New().String()
 	t.CreatedAt = time.Now()
 	t.UpdatedAt = time.Now()
+	if t.VerifyExpiresDays <= 0 {
+		t.VerifyExpiresDays = 90
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO extension_templates (uuid, name, max_dns, max_email, max_ip, max_uri, require_dns_verify, require_email_verify, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO extension_templates (uuid, name, max_dns, max_email, max_ip, max_uri, require_dns_verify, require_email_verify, verify_expires_days, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.UUID, t.Name, t.MaxDNS, t.MaxEmail, t.MaxIP, t.MaxURI,
-		boolToInt(t.RequireDNSVerify), boolToInt(t.RequireEmailVerify), t.CreatedAt, t.UpdatedAt,
+		boolToInt(t.RequireDNSVerify), boolToInt(t.RequireEmailVerify), t.VerifyExpiresDays,
+		t.CreatedAt, t.UpdatedAt,
 	)
 	return err
 }
@@ -186,7 +190,7 @@ func (s *Service) CreateExtensionTemplate(ctx context.Context, t *storage.Extens
 // ListExtensionTemplates 查询所有扩展信息模板。
 func (s *Service) ListExtensionTemplates(ctx context.Context) ([]*storage.ExtensionTemplate, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT uuid, name, max_dns, max_email, max_ip, max_uri, require_dns_verify, require_email_verify, created_at, updated_at
+		`SELECT uuid, name, max_dns, max_email, max_ip, max_uri, require_dns_verify, require_email_verify, verify_expires_days, created_at, updated_at
 		 FROM extension_templates ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -199,7 +203,7 @@ func (s *Service) ListExtensionTemplates(ctx context.Context) ([]*storage.Extens
 		t := &storage.ExtensionTemplate{}
 		var dnsVerify, emailVerify int
 		if err := rows.Scan(&t.UUID, &t.Name, &t.MaxDNS, &t.MaxEmail, &t.MaxIP, &t.MaxURI,
-			&dnsVerify, &emailVerify, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			&dnsVerify, &emailVerify, &t.VerifyExpiresDays, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		t.RequireDNSVerify = dnsVerify == 1
@@ -207,6 +211,23 @@ func (s *Service) ListExtensionTemplates(ctx context.Context) ([]*storage.Extens
 		templates = append(templates, t)
 	}
 	return templates, rows.Err()
+}
+
+// GetExtensionTemplate 按 UUID 查询扩展信息模板。
+func (s *Service) GetExtensionTemplate(ctx context.Context, tmplUUID string) (*storage.ExtensionTemplate, error) {
+	t := &storage.ExtensionTemplate{}
+	var dnsVerify, emailVerify int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT uuid, name, max_dns, max_email, max_ip, max_uri, require_dns_verify, require_email_verify, verify_expires_days, created_at, updated_at
+		 FROM extension_templates WHERE uuid = ?`, tmplUUID,
+	).Scan(&t.UUID, &t.Name, &t.MaxDNS, &t.MaxEmail, &t.MaxIP, &t.MaxURI,
+		&dnsVerify, &emailVerify, &t.VerifyExpiresDays, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	t.RequireDNSVerify = dnsVerify == 1
+	t.RequireEmailVerify = emailVerify == 1
+	return t, nil
 }
 
 // DeleteExtensionTemplate 删除扩展信息模板。

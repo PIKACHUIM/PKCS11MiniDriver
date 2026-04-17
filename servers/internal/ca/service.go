@@ -3,6 +3,7 @@ package ca
 
 import (
 	"context"
+	"crypto"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -10,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -227,13 +229,21 @@ func (s *Service) IncrementIssuedCount(ctx context.Context, caUUID string) error
 }
 
 // ImportChain 导入证书链（PEM 格式，包含多个证书）。
+//
+// 实现方式：
+//   为兼容 SQLite（`||`）、MySQL（`CONCAT`）、PostgreSQL（`||`）三种数据库的字符串拼接差异，
+//   这里采用「应用层读 → 拼接 → 写」的方式实现，避免使用 SQL 方言特有的运算符。
+//
+// 幂等性：
+//   如果输入的 chainPEM 已经完整包含在 ca.CertPEM 中，则不做任何修改，保证重复导入幂等。
 func (s *Service) ImportChain(ctx context.Context, caUUID string, chainPEM string) error {
-	// 验证 CA 存在
-	if _, err := s.GetByUUID(ctx, caUUID); err != nil {
+	// 1. 先读取 CA
+	ca, err := s.GetByUUID(ctx, caUUID)
+	if err != nil {
 		return err
 	}
 
-	// 解析证书链验证格式
+	// 2. 解析证书链以验证格式
 	rest := []byte(chainPEM)
 	count := 0
 	for len(rest) > 0 {
@@ -254,10 +264,144 @@ func (s *Service) ImportChain(ctx context.Context, caUUID string, chainPEM strin
 		return fmt.Errorf("证书链为空")
 	}
 
-	// 更新 CA 的证书 PEM（追加证书链）
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE cas SET cert_pem = cert_pem || ? || ?, updated_at = ? WHERE uuid = ?`,
-		"\n", chainPEM, time.Now(), caUUID,
+	// 3. 幂等检查：如果要导入的链已经在现有 PEM 中，直接成功返回
+	trimmed := strings.TrimSpace(chainPEM)
+	if trimmed != "" && strings.Contains(ca.CertPEM, trimmed) {
+		return nil
+	}
+
+	// 4. 应用层拼接：确保中间有换行分隔
+	newCertPEM := ca.CertPEM
+	if newCertPEM != "" && !strings.HasSuffix(newCertPEM, "\n") {
+		newCertPEM += "\n"
+	}
+	newCertPEM += chainPEM
+
+	// 5. 用标准 UPDATE 写回（跨数据库兼容）
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE cas SET cert_pem = ?, updated_at = ? WHERE uuid = ?`,
+		newCertPEM, time.Now(), caUUID,
 	)
 	return err
+}
+
+// ImportCAParams 是导入外部 CA 的参数。
+type ImportCAParams struct {
+	Name          string // CA 显示名称
+	CertPEM       string // CA 证书 PEM（可包含多张：第一张为叶子 CA，后续为链）
+	PrivateKeyPEM string // CA 私钥 PEM（支持 PKCS1/PKCS8/EC）
+	ParentUUID    string // 父 CA UUID（可选；若导入中间 CA 可关联）
+}
+
+// ImportCA 导入外部 CA 证书和私钥。
+// 校验：
+//   1. PEM 解析成功，证书必须是 CA（BasicConstraints.IsCA=true）；
+//   2. 私钥与证书公钥匹配；
+//   3. 加密存储私钥。
+func (s *Service) ImportCA(ctx context.Context, p *ImportCAParams) (*storage.CA, error) {
+	if p.Name == "" {
+		return nil, fmt.Errorf("CA 名称不能为空")
+	}
+	if p.CertPEM == "" || p.PrivateKeyPEM == "" {
+		return nil, fmt.Errorf("证书 PEM 和私钥 PEM 不能为空")
+	}
+
+	// 1. 解析证书（取第一张）
+	cert, err := parseCertPEM(p.CertPEM)
+	if err != nil {
+		return nil, fmt.Errorf("解析 CA 证书失败: %w", err)
+	}
+	if !cert.IsCA {
+		return nil, fmt.Errorf("导入的证书不是 CA 证书（BasicConstraints.IsCA=false）")
+	}
+
+	// 2. 解析私钥（尝试 PKCS8 / PKCS1 / EC 顺序）
+	keyBlock, _ := pem.Decode([]byte(p.PrivateKeyPEM))
+	if keyBlock == nil {
+		return nil, fmt.Errorf("无效的私钥 PEM")
+	}
+	privKey, err := parsePrivateKeyAny(keyBlock.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("解析私钥失败: %w", err)
+	}
+
+	// 3. 校验公私钥匹配
+	if err := verifyKeyPair(cert, privKey); err != nil {
+		return nil, fmt.Errorf("公私钥不匹配: %w", err)
+	}
+
+	// 4. PKCS8 编码后加密
+	privDER, err := x509.MarshalPKCS8PrivateKey(privKey)
+	if err != nil {
+		return nil, fmt.Errorf("序列化私钥失败: %w", err)
+	}
+	privEnc, err := encryptPrivateKey(s.masterKey, privDER)
+	if err != nil {
+		return nil, fmt.Errorf("加密私钥失败: %w", err)
+	}
+
+	// 5. 写入 CA 表（保留完整 PEM，便于后续读取证书链）
+	ca := &storage.CA{
+		Name:       p.Name,
+		CertPEM:    p.CertPEM,
+		PrivateEnc: privEnc,
+		ParentUUID: p.ParentUUID,
+		Status:     "active",
+		NotBefore:  cert.NotBefore,
+		NotAfter:   cert.NotAfter,
+	}
+	if err := s.Create(ctx, ca); err != nil {
+		return nil, fmt.Errorf("保存导入的 CA 失败: %w", err)
+	}
+	return ca, nil
+}
+
+// GetCAKeypair 返回 CA 的 X.509 证书对象和解密后的私钥 Signer。
+// 供 OCSP 响应签名、CRL 签发等场景使用。调用方应确保此方法仅在内部/受信任路径调用。
+func (s *Service) GetCAKeypair(ctx context.Context, caUUID string) (*x509.Certificate, crypto.Signer, error) {
+	caObj, err := s.GetByUUID(ctx, caUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+	block, _ := pem.Decode([]byte(caObj.CertPEM))
+	if block == nil {
+		return nil, nil, fmt.Errorf("CA 证书 PEM 解码失败")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("解析 CA 证书失败: %w", err)
+	}
+	signer, err := decryptPrivateKey(s.masterKey, caObj.PrivateEnc)
+	if err != nil {
+		return nil, nil, fmt.Errorf("解密 CA 私钥失败: %w", err)
+	}
+	return cert, signer, nil
+}
+
+// GetChain 返回指定 CA 及其所有父 CA 的 PEM 证书链（由下至上，即叶子 CA 在前、根 CA 在后）。
+// 若 CA 的 CertPEM 字段本身已包含多张证书（如导入时含完整链），将整体原样拼接。
+// 循环引用保护：最多递归 16 层。
+func (s *Service) GetChain(ctx context.Context, caUUID string) (string, error) {
+	var chain string
+	visited := make(map[string]bool)
+	currentUUID := caUUID
+	for i := 0; i < 16; i++ {
+		if currentUUID == "" || visited[currentUUID] {
+			break
+		}
+		visited[currentUUID] = true
+		ca, err := s.GetByUUID(ctx, currentUUID)
+		if err != nil {
+			return "", err
+		}
+		if chain != "" && chain[len(chain)-1] != '\n' {
+			chain += "\n"
+		}
+		chain += ca.CertPEM
+		currentUUID = ca.ParentUUID
+	}
+	if chain == "" {
+		return "", fmt.Errorf("CA 链为空")
+	}
+	return chain, nil
 }

@@ -311,3 +311,34 @@ func IsNetworkError(err error) bool {
 		strings.Contains(err.Error(), "no such host") ||
 		strings.Contains(err.Error(), "i/o timeout")
 }
+
+// ---- 证书下发 API ----
+
+// DeliveredCert 是云端下发的证书及其私钥（PEM 格式）。
+// CanRedeliver 表示该证书云端策略是否允许再次下发。
+type DeliveredCert struct {
+	CertPEM      string `json:"cert_pem"`
+	KeyPEM       string `json:"key_pem"`
+	ChainPEM     string `json:"chain_pem,omitempty"`
+	Algorithm    string `json:"algorithm,omitempty"`   // rsa2048 / ec256 等
+	CanRedeliver bool   `json:"can_redeliver"`
+	SerialNumber string `json:"serial_number,omitempty"`
+	CommonName   string `json:"common_name,omitempty"`
+	NotBefore    string `json:"not_before,omitempty"`
+	NotAfter     string `json:"not_after,omitempty"`
+}
+
+// DownloadCertWithKey 从 servers 下发指定证书（含私钥）。
+// 约定的云端接口：POST /api/certificates/{uuid}/download，响应体为 DeliveredCert。
+// 若云端返回 403 + 特定 code，则视为"不允许下发"并将 CanRedeliver 置 false。
+func (c *Client) DownloadCertWithKey(ctx context.Context, certUUID string) (*DeliveredCert, error) {
+	if certUUID == "" {
+		return nil, fmt.Errorf("certUUID 不能为空")
+	}
+	var resp DeliveredCert
+	path := fmt.Sprintf("/api/certificates/%s/download", certUUID)
+	if err := c.post(ctx, path, map[string]string{}, &resp); err != nil {
+		return nil, fmt.Errorf("下发云端证书失败: %w", err)
+	}
+	return &resp, nil
+}

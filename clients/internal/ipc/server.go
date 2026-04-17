@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -184,6 +185,46 @@ func (s *Server) acceptLoop() {
 		s.trackConn(conn)
 		go s.handleConn(conn)
 	}
+}
+
+// BroadcastSlotChanged 向所有当前活跃的 IPC 连接推送一个 CmdSlotChanged 事件。
+// 该方法不会阻塞调用方：每条连接的推送都在独立 goroutine 中异步发送，
+// 并带 2 秒写入超时，避免慢客户端拖累整体广播。
+//
+// reason 可选 "create" / "delete" / "update" / "sync"，仅用于诊断。
+// 失败（连接已断开、对端未 accept 等）仅记录 warn 日志，不向上返回错误。
+func (s *Server) BroadcastSlotChanged(reason string) {
+	payload, err := json.Marshal(SlotChangedEvent{
+		Reason:    reason,
+		Timestamp: time.Now().Unix(),
+	})
+	if err != nil {
+		slog.Warn("序列化 SlotChanged 事件失败", "error", err)
+		return
+	}
+
+	s.connsMu.Lock()
+	conns := make([]net.Conn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
+	}
+	s.connsMu.Unlock()
+
+	if len(conns) == 0 {
+		slog.Debug("BroadcastSlotChanged: 无活跃连接")
+		return
+	}
+
+	for _, c := range conns {
+		conn := c
+		go func() {
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			if err := WriteFrame(conn, CmdSlotChanged, payload); err != nil {
+				slog.Warn("推送 SlotChanged 事件失败", "error", err)
+			}
+		}()
+	}
+	slog.Debug("已广播 SlotChanged 事件", "conn_count", len(conns), "reason", reason)
 }
 
 // handleConn 处理单个连接的请求循环。

@@ -4,25 +4,34 @@ package verification
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/globaltrusts/server-card/internal/mailer"
 	"github.com/globaltrusts/server-card/internal/storage"
 )
 
 // Service 是验证服务。
 type Service struct {
-	db *storage.DB
+	db     *storage.DB
+	mailer mailer.Mailer // 可选，为 nil 时使用 nopMailer
 }
 
 // NewService 创建验证服务。
 func NewService(db *storage.DB) *Service {
 	return &Service{db: db}
+}
+
+// SetMailer 注入邮件发送器（在服务装配阶段调用）。
+func (s *Service) SetMailer(m mailer.Mailer) {
+	s.mailer = m
 }
 
 // ---- 主体信息管理 ----
@@ -96,44 +105,144 @@ func (s *Service) RejectSubjectInfo(ctx context.Context, infoUUID, adminUUID str
 // ---- 扩展信息（域名/邮箱/IP）验证 ----
 
 // CreateExtensionInfo 创建扩展信息验证请求。
+// 若 info.TmplUUID 非空，则按关联模板校验 require_dns_verify/require_email_verify/max_* 约束。
+// 对于 info_type=email：
+//   - 生成 6 位数字验证码（仅存 SHA-256 hash，不明文保存）；
+//   - verify_token 存随机 hex 用于 DNS-like 自证或 URL 令牌；
+//   - 若已注入 mailer，则异步发送验证码邮件；
+//   - 用户调用 VerifyEmailCode 输入验证码完成验证。
 func (s *Service) CreateExtensionInfo(ctx context.Context, info *storage.ExtensionInfo) error {
 	info.UUID = uuid.New().String()
 	info.VerifyStatus = "pending"
 	info.CreatedAt = time.Now()
 	info.UpdatedAt = time.Now()
 
-	// 生成验证 token
+	// 校验模板约束（如指定了 TmplUUID）
+	if info.TmplUUID != "" {
+		if err := s.validateExtensionAgainstTemplate(ctx, info); err != nil {
+			return err
+		}
+	}
+
+	// 生成验证 token 和可选的验证码 hash
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return fmt.Errorf("生成验证 token 失败: %w", err)
 	}
 	info.VerifyToken = hex.EncodeToString(tokenBytes)
 
+	var emailCode string
+	if info.InfoType == "email" {
+		code, err := randomNumeric(6)
+		if err != nil {
+			return fmt.Errorf("生成验证码失败: %w", err)
+		}
+		emailCode = code
+		sum := sha256.Sum256([]byte(code))
+		info.VerifyCodeHash = hex.EncodeToString(sum[:])
+	}
+
 	// 根据类型设置默认验证方式
 	switch info.InfoType {
 	case "domain":
 		if info.VerifyMethod == "" {
-			info.VerifyMethod = "txt" // 默认 DNS TXT 验证
+			info.VerifyMethod = "txt"
 		}
 	case "email":
-		info.VerifyMethod = "email" // 邮箱只能通过邮件验证
+		info.VerifyMethod = "email"
 	case "ip":
-		info.VerifyMethod = "http" // IP 通过 HTTP 验证
+		info.VerifyMethod = "http"
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO extension_infos (uuid, user_uuid, info_type, value, verify_method, verify_token, verify_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		info.UUID, info.UserUUID, info.InfoType, info.Value, info.VerifyMethod, info.VerifyToken,
-		info.VerifyStatus, info.CreatedAt, info.UpdatedAt,
+		`INSERT INTO extension_infos (uuid, user_uuid, tmpl_uuid, info_type, value, verify_method, verify_token, verify_code_hash, verify_status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		info.UUID, info.UserUUID, info.TmplUUID, info.InfoType, info.Value, info.VerifyMethod,
+		info.VerifyToken, info.VerifyCodeHash, info.VerifyStatus, info.CreatedAt, info.UpdatedAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// 异步发送邮件（仅对 email 类型）
+	if info.InfoType == "email" && s.mailer != nil && emailCode != "" {
+		target := info.Value
+		code := emailCode
+		go func() {
+			subject := "OpenCert 邮箱验证码"
+			body := fmt.Sprintf("您正在验证邮箱 %s\n\n验证码：%s\n\n有效期：15 分钟。\n如非本人操作请忽略此邮件。", target, code)
+			_ = s.mailer.Send(target, subject, body)
+		}()
+	}
+	return nil
+}
+
+// validateExtensionAgainstTemplate 根据扩展模板校验 info。
+// 当前校验：根据 InfoType 判断是否必填（RequireDNSVerify/RequireEmailVerify），其余 max_* 限制由调用方批量提交时校验。
+func (s *Service) validateExtensionAgainstTemplate(ctx context.Context, info *storage.ExtensionInfo) error {
+	var maxDNS, maxEmail, maxIP, maxURI, requireDNS, requireEmail int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT max_dns, max_email, max_ip, max_uri, require_dns_verify, require_email_verify
+		 FROM extension_templates WHERE uuid = ?`, info.TmplUUID,
+	).Scan(&maxDNS, &maxEmail, &maxIP, &maxURI, &requireDNS, &requireEmail)
+	if err != nil {
+		// 模板不存在时跳过，不阻塞业务
+		return nil
+	}
+
+	// 统计当前用户同模板下已有条目数（pending+verified）用于 max_* 限制
+	var countDNS, countEmail, countIP int
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM extension_infos WHERE user_uuid = ? AND tmpl_uuid = ? AND info_type = 'domain'`,
+		info.UserUUID, info.TmplUUID,
+	).Scan(&countDNS)
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM extension_infos WHERE user_uuid = ? AND tmpl_uuid = ? AND info_type = 'email'`,
+		info.UserUUID, info.TmplUUID,
+	).Scan(&countEmail)
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM extension_infos WHERE user_uuid = ? AND tmpl_uuid = ? AND info_type = 'ip'`,
+		info.UserUUID, info.TmplUUID,
+	).Scan(&countIP)
+
+	switch info.InfoType {
+	case "domain":
+		if maxDNS > 0 && countDNS >= maxDNS {
+			return fmt.Errorf("该模板下 DNS 名称已达上限 %d", maxDNS)
+		}
+	case "email":
+		if maxEmail > 0 && countEmail >= maxEmail {
+			return fmt.Errorf("该模板下邮箱已达上限 %d", maxEmail)
+		}
+	case "ip":
+		if maxIP > 0 && countIP >= maxIP {
+			return fmt.Errorf("该模板下 IP 已达上限 %d", maxIP)
+		}
+	}
+	return nil
+}
+
+// randomNumeric 生成 n 位纯数字验证码（安全随机）。
+func randomNumeric(n int) (string, error) {
+	if n <= 0 {
+		return "", fmt.Errorf("长度必须为正")
+	}
+	const digits = "0123456789"
+	out := make([]byte, n)
+	for i := 0; i < n; i++ {
+		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(digits))))
+		if err != nil {
+			return "", err
+		}
+		out[i] = digits[idx.Int64()]
+	}
+	return string(out), nil
 }
 
 // ListExtensionInfos 查询用户的扩展信息列表。
 func (s *Service) ListExtensionInfos(ctx context.Context, userUUID string) ([]*storage.ExtensionInfo, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT uuid, user_uuid, info_type, value, verify_method, verify_token, verify_status, verified_at, expires_at, created_at, updated_at
+		`SELECT uuid, user_uuid, tmpl_uuid, info_type, value, verify_method, verify_token, verify_code_hash, verify_status, verified_at, expires_at, created_at, updated_at
 		 FROM extension_infos WHERE user_uuid = ? ORDER BY created_at DESC`, userUUID,
 	)
 	if err != nil {
@@ -145,8 +254,8 @@ func (s *Service) ListExtensionInfos(ctx context.Context, userUUID string) ([]*s
 	for rows.Next() {
 		info := &storage.ExtensionInfo{}
 		var verifiedAt, expiresAt sql.NullTime
-		if err := rows.Scan(&info.UUID, &info.UserUUID, &info.InfoType, &info.Value, &info.VerifyMethod,
-			&info.VerifyToken, &info.VerifyStatus, &verifiedAt, &expiresAt, &info.CreatedAt, &info.UpdatedAt); err != nil {
+		if err := rows.Scan(&info.UUID, &info.UserUUID, &info.TmplUUID, &info.InfoType, &info.Value, &info.VerifyMethod,
+			&info.VerifyToken, &info.VerifyCodeHash, &info.VerifyStatus, &verifiedAt, &expiresAt, &info.CreatedAt, &info.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if verifiedAt.Valid {
@@ -187,6 +296,7 @@ func (s *Service) VerifyDNSTXT(ctx context.Context, infoUUID string) error {
 }
 
 // VerifyEmailCode 验证邮箱验证码。
+// 通过比较 SHA-256(code) 与 verify_code_hash 判定。
 func (s *Service) VerifyEmailCode(ctx context.Context, infoUUID, code string) error {
 	info, err := s.getExtensionInfo(ctx, infoUUID)
 	if err != nil {
@@ -195,10 +305,12 @@ func (s *Service) VerifyEmailCode(ctx context.Context, infoUUID, code string) er
 	if info.InfoType != "email" {
 		return fmt.Errorf("此验证项不支持邮箱验证")
 	}
+	if info.VerifyCodeHash == "" {
+		return fmt.Errorf("验证码未初始化，请重新发起验证")
+	}
 
-	// 验证码是 token 的前 6 位
-	expectedCode := info.VerifyToken[:6]
-	if code != expectedCode {
+	sum := sha256.Sum256([]byte(code))
+	if hex.EncodeToString(sum[:]) != info.VerifyCodeHash {
 		return fmt.Errorf("验证码错误")
 	}
 
@@ -233,10 +345,10 @@ func (s *Service) getExtensionInfo(ctx context.Context, infoUUID string) (*stora
 	info := &storage.ExtensionInfo{}
 	var verifiedAt, expiresAt sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		`SELECT uuid, user_uuid, info_type, value, verify_method, verify_token, verify_status, verified_at, expires_at
+		`SELECT uuid, user_uuid, tmpl_uuid, info_type, value, verify_method, verify_token, verify_code_hash, verify_status, verified_at, expires_at
 		 FROM extension_infos WHERE uuid = ?`, infoUUID,
-	).Scan(&info.UUID, &info.UserUUID, &info.InfoType, &info.Value, &info.VerifyMethod,
-		&info.VerifyToken, &info.VerifyStatus, &verifiedAt, &expiresAt)
+	).Scan(&info.UUID, &info.UserUUID, &info.TmplUUID, &info.InfoType, &info.Value, &info.VerifyMethod,
+		&info.VerifyToken, &info.VerifyCodeHash, &info.VerifyStatus, &verifiedAt, &expiresAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("验证项不存在: %s", infoUUID)
 	}
@@ -251,7 +363,22 @@ func (s *Service) getExtensionInfo(ctx context.Context, infoUUID string) (*stora
 
 func (s *Service) markVerified(ctx context.Context, infoUUID string) error {
 	now := time.Now()
-	expiresAt := now.AddDate(0, 0, 90) // 验证有效期 90 天
+
+	// 优先按扩展信息模板的 verify_expires_days 计算过期时间；模板不存在或未配置时使用默认 90 天。
+	days := 90
+	var tmplUUID string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT tmpl_uuid FROM extension_infos WHERE uuid = ?`, infoUUID,
+	).Scan(&tmplUUID); err == nil && tmplUUID != "" {
+		var d int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT verify_expires_days FROM extension_templates WHERE uuid = ?`, tmplUUID,
+		).Scan(&d); err == nil && d > 0 {
+			days = d
+		}
+	}
+	expiresAt := now.AddDate(0, 0, days)
+
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE extension_infos SET verify_status = 'verified', verified_at = ?, expires_at = ?, updated_at = ? WHERE uuid = ?`,
 		now, expiresAt, now, infoUUID,

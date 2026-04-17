@@ -22,6 +22,7 @@ import (
 	"github.com/globaltrusts/server-card/internal/card"
 	"github.com/globaltrusts/server-card/internal/ct"
 	"github.com/globaltrusts/server-card/internal/issuance"
+	"github.com/globaltrusts/server-card/internal/mailer"
 	"github.com/globaltrusts/server-card/internal/payment"
 	"github.com/globaltrusts/server-card/internal/revocation"
 	"github.com/globaltrusts/server-card/internal/storage"
@@ -81,9 +82,11 @@ func main() {
 
 	// 初始化验证服务
 	verifySvc := verification.NewService(db)
+	// 注入邮件发送器（SMTP 未启用时自动退化为日志输出）
+	verifySvc.SetMailer(mailer.New(cfg.SMTP))
 
-	// 初始化工作流服务
-	workflowSvc := workflow.NewService(db)
+	// 初始化工作流服务（注入 caSvc/issuanceSvc 以支持审批自动签发）
+	workflowSvc := workflow.NewService(db, caSvc, issuanceSvc)
 
 	// 初始化支付系统
 	paymentRegistry := payment.NewRegistry()
@@ -100,6 +103,8 @@ func main() {
 
 	// 初始化 ACME 服务
 	acmeSvc := acme.NewService(db)
+	// 注入 CA 签发依赖（避免循环依赖）
+	acmeSvc.SetCASvc(caSvc)
 
 	// 启动定时任务：关闭超时未支付订单
 	go func() {

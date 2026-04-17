@@ -2,10 +2,14 @@
 package ca
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -19,6 +23,54 @@ func parseCertPEM(certPEM string) (*x509.Certificate, error) {
 		return nil, fmt.Errorf("无效的 PEM 证书")
 	}
 	return x509.ParseCertificate(block.Bytes)
+}
+
+// parsePrivateKeyAny 依次尝试以 PKCS8 / PKCS1 RSA / EC 格式解析私钥 DER。
+func parsePrivateKeyAny(der []byte) (crypto.PrivateKey, error) {
+	if k, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		return k, nil
+	}
+	if k, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return k, nil
+	}
+	if k, err := x509.ParseECPrivateKey(der); err == nil {
+		return k, nil
+	}
+	return nil, fmt.Errorf("未知的私钥格式")
+}
+
+// verifyKeyPair 校验私钥与证书公钥匹配（对比公钥 DER）。
+func verifyKeyPair(cert *x509.Certificate, priv crypto.PrivateKey) error {
+	privPub, err := extractPublicKey(priv)
+	if err != nil {
+		return err
+	}
+	privPubDER, err := x509.MarshalPKIXPublicKey(privPub)
+	if err != nil {
+		return fmt.Errorf("序列化私钥对应公钥失败: %w", err)
+	}
+	certPubDER, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
+	if err != nil {
+		return fmt.Errorf("序列化证书公钥失败: %w", err)
+	}
+	if !bytes.Equal(privPubDER, certPubDER) {
+		return fmt.Errorf("证书公钥与私钥不匹配")
+	}
+	return nil
+}
+
+// extractPublicKey 从任意私钥类型提取对应的公钥接口。
+func extractPublicKey(priv crypto.PrivateKey) (crypto.PublicKey, error) {
+	switch k := priv.(type) {
+	case *rsa.PrivateKey:
+		return &k.PublicKey, nil
+	case *ecdsa.PrivateKey:
+		return &k.PublicKey, nil
+	case ed25519.PrivateKey:
+		return k.Public(), nil
+	default:
+		return nil, fmt.Errorf("不支持的私钥类型 %T", priv)
+	}
 }
 
 // decryptPrivateKey 使用主密钥 AES-256-GCM 解密私钥，返回 crypto.Signer。

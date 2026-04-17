@@ -48,6 +48,14 @@ http.interceptors.response.use(
   }
 );
 
+// ---- 通用请求函数（兼容 fetch 风格调用） ----
+export const apiRequest = async (url: string, options?: { method?: string; body?: string }) => {
+  const method = (options?.method || 'GET').toLowerCase();
+  const data = options?.body ? JSON.parse(options.body) : undefined;
+  const res = await (http as any)[method](url, data);
+  return res.data;
+};
+
 // ---- 健康检查 ----
 export const getHealth = () =>
   http.get<{ status: string; version: string }>('/api/health').then((r) => r.data);

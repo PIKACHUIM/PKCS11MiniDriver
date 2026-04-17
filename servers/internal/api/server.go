@@ -57,6 +57,7 @@ type Server struct {
 	revocationSvc *revocation.Service
 	ctSvc         *ct.Service
 	acmeSvc       *acme.Service
+	pinSessions   *card.PINSessionStore // PIN 会话令牌存储
 }
 
 // NewServer 创建 API 服务器。
@@ -78,6 +79,7 @@ func NewServer(cfg *configs.Config, db *storage.DB, jwtMgr *auth.Manager, svcs *
 		revocationSvc: svcs.RevocationSvc,
 		ctSvc:         svcs.CTSvc,
 		acmeSvc:       svcs.ACMESvc,
+		pinSessions:   card.NewPINSessionStore(card.DefaultPINSessionTTL),
 	}
 
 	mux := http.NewServeMux()
@@ -170,9 +172,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/certs/{uuid}/assign", s.adminOnly(s.handleAssignCertToCard))
 	mux.HandleFunc("POST /api/certs/{uuid}/renew", s.authMiddleware(s.handleRenewCert))
 	mux.HandleFunc("GET /api/certs/{uuid}/export", s.authMiddleware(s.handleExportCert))
+	mux.HandleFunc("GET /api/certs/{uuid}/chain", s.authMiddleware(s.handleGetCertChain))
 
 	// 卡片 PIN/PUK/Admin Key 管理（需要认证）
 	mux.HandleFunc("POST /api/cards/{uuid}/verify-pin", s.authMiddleware(s.handleVerifyPIN))
+	mux.HandleFunc("DELETE /api/cards/{uuid}/pin-session", s.authMiddleware(s.handleLogoutPINSession))
 	mux.HandleFunc("POST /api/cards/{uuid}/unlock-puk", s.authMiddleware(s.handleUnlockWithPUK))
 	mux.HandleFunc("POST /api/cards/{uuid}/reset-admin", s.authMiddleware(s.handleResetWithAdminKey))
 
@@ -212,10 +216,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// CA 管理（读取需认证，写入需管理员）
 	mux.HandleFunc("GET /api/cas", s.authMiddleware(s.handleListCAs))
 	mux.HandleFunc("POST /api/cas", s.adminOnly(s.handleCreateCA))
+	mux.HandleFunc("POST /api/cas/import", s.adminOnly(s.handleImportCA))
 	mux.HandleFunc("GET /api/cas/{uuid}", s.authMiddleware(s.handleGetCA))
 	mux.HandleFunc("PUT /api/cas/{uuid}", s.adminOnly(s.handleUpdateCA))
 	mux.HandleFunc("DELETE /api/cas/{uuid}", s.adminOnly(s.handleDeleteCA))
 	mux.HandleFunc("POST /api/cas/{uuid}/import-chain", s.adminOnly(s.handleImportCAChain))
+	mux.HandleFunc("GET /api/cas/{uuid}/chain", s.authMiddleware(s.handleGetCAChain))
 	mux.HandleFunc("GET /api/cas/{uuid}/revoked", s.authMiddleware(s.handleListRevokedCerts))
 	mux.HandleFunc("POST /api/cas/{uuid}/revoke", s.adminOnly(s.handleRevokeCert))
 	mux.HandleFunc("GET /api/cas/{uuid}/crl", s.handleGetCRL)
@@ -268,11 +274,23 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/oids", s.adminOnly(s.handleCreateOID))
 	mux.HandleFunc("DELETE /api/oids/{uuid}", s.adminOnly(s.handleDeleteOID))
 
+	// 元数据接口（静态预置数据，需要认证即可访问）
+	mux.HandleFunc("GET /api/meta/subject-fields", s.authMiddleware(s.handleGetSubjectFields))
+	mux.HandleFunc("GET /api/meta/predefined-oids", s.authMiddleware(s.handleGetPredefinedOIDs))
+	mux.HandleFunc("GET /api/meta/predefined-oids/categories", s.authMiddleware(s.handleListOIDCategories))
+	mux.HandleFunc("GET /api/meta/algorithms", s.authMiddleware(s.handleGetAlgorithms))
+
 	// 云端 TOTP 管理（需要认证）- 路径统一为 /api/cloud-totp
 	mux.HandleFunc("GET /api/cloud-totp", s.authMiddleware(s.handleListUserTOTPs))
 	mux.HandleFunc("POST /api/cloud-totp", s.writeOnly(s.handleCreateUserTOTP))
 	mux.HandleFunc("GET /api/cloud-totp/{uuid}/code", s.authMiddleware(s.handleGetTOTPCode))
 	mux.HandleFunc("DELETE /api/cloud-totp/{uuid}", s.writeOnly(s.handleDeleteUserTOTP))
+
+	// 登录 TOTP 自主绑定（users.totp_secret）：与云端 TOTP 管理不同，这是登录二次验证
+	mux.HandleFunc("GET /api/user/login-totp/status", s.authMiddleware(s.handleLoginTOTPStatus))
+	mux.HandleFunc("POST /api/user/login-totp/generate", s.authMiddleware(s.handleGenerateLoginTOTP))
+	mux.HandleFunc("POST /api/user/login-totp/bind", s.authMiddleware(s.handleBindLoginTOTP))
+	mux.HandleFunc("DELETE /api/user/login-totp", s.authMiddleware(s.handleUnbindLoginTOTP))
 
 	// 主体信息管理（需要认证）
 	mux.HandleFunc("GET /api/subject-infos", s.authMiddleware(s.handleListSubjectInfos))
@@ -303,10 +321,12 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// 公开服务路由（无需认证，供外部客户端访问）
 	mux.HandleFunc("GET /crl/{caUUID}", s.handlePublicCRL)
 	mux.HandleFunc("POST /ocsp/{caUUID}", s.handlePublicOCSP)
+	mux.HandleFunc("GET /ocsp/{caUUID}", s.handlePublicOCSP)
 	mux.HandleFunc("GET /ca/{caUUID}", s.handlePublicCAIssuer)
 	// 自定义路径的吊销服务路由（通过 revocation_services 表配置）
 	mux.HandleFunc("GET /pki/crl/{path}", s.handlePublicCRLByPath)
 	mux.HandleFunc("POST /pki/ocsp/{path}", s.handlePublicOCSPByPath)
+	mux.HandleFunc("GET /pki/ocsp/{path}", s.handlePublicOCSPByPath)
 	mux.HandleFunc("GET /pki/ca/{path}", s.handlePublicCAIssuerByPath)
 	mux.HandleFunc("GET /acme/{path}/directory", s.handleACMEDirectory)
 	mux.HandleFunc("HEAD /acme/{path}/new-nonce", s.handleACMENewNonce)
@@ -414,6 +434,31 @@ func (s *Server) writeOnly(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	})
+}
+
+// checkPINSession 校验 X-PIN-Session 令牌与当前卡片 UUID 和用户 UUID 是否匹配。
+// 校验失败时写回 401，并返回 false；若卡片未设置 PIN（即未启用 PIN 保护）则直接放行。
+// 注意：需在 authMiddleware 之后调用，ctx 中必须已有 claims。
+func (s *Server) checkPINSession(w http.ResponseWriter, r *http.Request, cardUUID string) bool {
+	claims := claimsFromCtx(r.Context())
+
+	// 若卡片未设置 PIN，跳过校验（兼容历史卡片）
+	c, err := s.cardSvc.GetCard(r.Context(), cardUUID, claims.UserUUID)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return false
+	}
+	if len(c.PINData) == 0 {
+		return true
+	}
+
+	token := r.Header.Get("X-PIN-Session")
+	if _, err := s.pinSessions.Verify(token, cardUUID, claims.UserUUID); err != nil {
+		w.Header().Set("X-PIN-Required", "true")
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return false
+	}
+	return true
 }
 
 // ---- 工具函数 ----

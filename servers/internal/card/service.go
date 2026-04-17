@@ -6,14 +6,19 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/md5" //nolint:gosec // MD5 仅为兼容遗留签名机制保留
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1" //nolint:gosec // SHA1 仅为兼容遗留签名机制保留
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+
+	"golang.org/x/crypto/sha3"
 
 	"github.com/globaltrusts/server-card/internal/storage"
 )
@@ -429,21 +434,37 @@ func (s *Service) DecryptData(blob []byte) ([]byte, error) {
 }
 
 // generateKeyPair 生成密钥对，返回私钥和公钥 DER。
+// generateKeyPair 生成密钥对，返回私钥和公钥 DER。
+// 支持的 keyType：
+//   - RSA：rsa1024, rsa2048, rsa3072, rsa4096, rsa8192
+//   - ECDSA：ec256/p256, ec384/p384, ec521/p521
+//   - EdDSA：ed25519（主要用于签名，不用于加密）
+//
+// 注意：X25519 仅用于密钥协商（ECDH），不用于证书签名，因此不列入；
+// Brainpool 曲线 Go 标准库无直接支持，如需启用需引入第三方包。
 func generateKeyPair(keyType string) (crypto.PrivateKey, []byte, error) {
 	var privKey crypto.PrivateKey
 	var err error
 
 	switch keyType {
+	case "rsa1024":
+		privKey, err = rsa.GenerateKey(rand.Reader, 1024)
 	case "rsa2048":
 		privKey, err = rsa.GenerateKey(rand.Reader, 2048)
+	case "rsa3072":
+		privKey, err = rsa.GenerateKey(rand.Reader, 3072)
 	case "rsa4096":
 		privKey, err = rsa.GenerateKey(rand.Reader, 4096)
-	case "ec256":
+	case "rsa8192":
+		privKey, err = rsa.GenerateKey(rand.Reader, 8192)
+	case "ec256", "p256":
 		privKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	case "ec384":
+	case "ec384", "p384":
 		privKey, err = ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-	case "ec521":
+	case "ec521", "p521":
 		privKey, err = ecdsa.GenerateKey(elliptic.P521(), rand.Reader)
+	case "ed25519":
+		_, privKey, err = ed25519.GenerateKey(rand.Reader)
 	default:
 		return nil, nil, fmt.Errorf("不支持的密钥类型: %s", keyType)
 	}
@@ -458,6 +479,8 @@ func generateKeyPair(keyType string) (crypto.PrivateKey, []byte, error) {
 		pubKey = &k.PublicKey
 	case *ecdsa.PrivateKey:
 		pubKey = &k.PublicKey
+	case ed25519.PrivateKey:
+		pubKey = k.Public()
 	}
 
 	pubDER, err := x509.MarshalPKIXPublicKey(pubKey)
@@ -499,6 +522,9 @@ func signData(privKey crypto.PrivateKey, mechanism string, data []byte) ([]byte,
 		return signRSA(key, mechanism, data)
 	case *ecdsa.PrivateKey:
 		return signECDSA(key, mechanism, data)
+	case ed25519.PrivateKey:
+		// Ed25519 对任意长度消息直接签名，mechanism 参数被忽略（Ed25519 内置 SHA-512）。
+		return ed25519.Sign(key, data), nil
 	default:
 		return nil, fmt.Errorf("不支持的私钥类型: %T", privKey)
 	}
@@ -506,6 +532,13 @@ func signData(privKey crypto.PrivateKey, mechanism string, data []byte) ([]byte,
 
 func signRSA(key *rsa.PrivateKey, mechanism string, data []byte) ([]byte, error) {
 	switch mechanism {
+	// ---- PKCS#1 v1.5 ----
+	case "MD5_RSA_PKCS":
+		h := md5.Sum(data) //nolint:gosec // 兼容遗留
+		return rsa.SignPKCS1v15(rand.Reader, key, crypto.MD5, h[:])
+	case "SHA1_RSA_PKCS":
+		h := sha1.Sum(data) //nolint:gosec // 兼容遗留
+		return rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA1, h[:])
 	case "SHA256_RSA_PKCS":
 		h := sha256.Sum256(data)
 		return rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, h[:])
@@ -515,9 +548,34 @@ func signRSA(key *rsa.PrivateKey, mechanism string, data []byte) ([]byte, error)
 	case "SHA512_RSA_PKCS":
 		h := sha512.Sum512(data)
 		return rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA512, h[:])
+	case "SHA3_256_RSA_PKCS":
+		h := sha3.Sum256(data)
+		return rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA3_256, h[:])
+	case "SHA3_384_RSA_PKCS":
+		h := sha3.Sum384(data)
+		return rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA3_384, h[:])
+	case "SHA3_512_RSA_PKCS":
+		h := sha3.Sum512(data)
+		return rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA3_512, h[:])
+	// ---- RSA-PSS ----
 	case "SHA256_RSA_PSS":
 		h := sha256.Sum256(data)
 		return rsa.SignPSS(rand.Reader, key, crypto.SHA256, h[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto})
+	case "SHA384_RSA_PSS":
+		h := sha512.Sum384(data)
+		return rsa.SignPSS(rand.Reader, key, crypto.SHA384, h[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto})
+	case "SHA512_RSA_PSS":
+		h := sha512.Sum512(data)
+		return rsa.SignPSS(rand.Reader, key, crypto.SHA512, h[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto})
+	case "SHA3_256_RSA_PSS":
+		h := sha3.Sum256(data)
+		return rsa.SignPSS(rand.Reader, key, crypto.SHA3_256, h[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto})
+	case "SHA3_384_RSA_PSS":
+		h := sha3.Sum384(data)
+		return rsa.SignPSS(rand.Reader, key, crypto.SHA3_384, h[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto})
+	case "SHA3_512_RSA_PSS":
+		h := sha3.Sum512(data)
+		return rsa.SignPSS(rand.Reader, key, crypto.SHA3_512, h[:], &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto})
 	default:
 		return nil, fmt.Errorf("不支持的 RSA 签名算法: %s", mechanism)
 	}
@@ -528,6 +586,9 @@ func signECDSA(key *ecdsa.PrivateKey, mechanism string, data []byte) ([]byte, er
 	switch mechanism {
 	case "ECDSA":
 		digest = data
+	case "ECDSA_SHA1":
+		h := sha1.Sum(data) //nolint:gosec // 兼容遗留
+		digest = h[:]
 	case "ECDSA_SHA256":
 		h := sha256.Sum256(data)
 		digest = h[:]
@@ -536,6 +597,15 @@ func signECDSA(key *ecdsa.PrivateKey, mechanism string, data []byte) ([]byte, er
 		digest = h[:]
 	case "ECDSA_SHA512":
 		h := sha512.Sum512(data)
+		digest = h[:]
+	case "ECDSA_SHA3_256":
+		h := sha3.Sum256(data)
+		digest = h[:]
+	case "ECDSA_SHA3_384":
+		h := sha3.Sum384(data)
+		digest = h[:]
+	case "ECDSA_SHA3_512":
+		h := sha3.Sum512(data)
 		digest = h[:]
 	default:
 		return nil, fmt.Errorf("不支持的 ECDSA 签名算法: %s", mechanism)

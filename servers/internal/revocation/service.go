@@ -3,13 +3,18 @@ package revocation
 
 import (
 	"context"
+	"crypto"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math/big"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/ocsp"
 	"github.com/globaltrusts/server-card/internal/ca"
 	"github.com/globaltrusts/server-card/internal/storage"
 )
@@ -32,20 +37,29 @@ type OCSPStatus struct {
 	Reason       int        `json:"reason,omitempty"`
 }
 
+// crlScheduler 描述单个 CA 的 CRL 刷新调度器。
+type crlScheduler struct {
+	cancel   context.CancelFunc
+	interval int // 当前调度间隔（分钟）
+}
+
 // Service 是吊销服务管理。
 type Service struct {
-	db         *storage.DB
-	caSvc      *ca.Service
-	crlCache   map[string][]byte // caUUID -> CRL DER
-	crlCacheMu sync.RWMutex
+	db           *storage.DB
+	caSvc        *ca.Service
+	crlCache     map[string][]byte // caUUID -> CRL DER
+	crlCacheMu   sync.RWMutex
+	schedulers   map[string]*crlScheduler // caUUID -> 独立调度器
+	schedulersMu sync.Mutex
 }
 
 // NewService 创建吊销服务。
 func NewService(db *storage.DB, caSvc *ca.Service) *Service {
 	return &Service{
-		db:       db,
-		caSvc:    caSvc,
-		crlCache: make(map[string][]byte),
+		db:         db,
+		caSvc:      caSvc,
+		crlCache:   make(map[string][]byte),
+		schedulers: make(map[string]*crlScheduler),
 	}
 }
 
@@ -171,35 +185,127 @@ func (s *Service) GetCAIssuerCert(ctx context.Context, caUUID string) (string, e
 	return caObj.CertPEM, nil
 }
 
-// StartCRLRefreshLoop 启动 CRL 定时刷新循环。
+// StartCRLRefreshLoop 启动 CRL 调度管理器。
+// 架构：
+//   1. 主循环每 60 秒扫描 revocation_services 表，同步各 CA 的独立调度器；
+//   2. 每个启用的 CRL 配置对应一个独立 goroutine，按自身 CRLInterval（分钟）刷新；
+//   3. 配置新增/删除/间隔变更时，对应调度器会被启动/停止/重建；
+//   4. 主 ctx 取消时，所有子调度器级联退出。
 func (s *Service) StartCRLRefreshLoop(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
+		// 启动立即同步一次
+		s.syncSchedulers(ctx)
+		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
-
 		for {
 			select {
 			case <-ctx.Done():
+				s.stopAllSchedulers()
 				return
 			case <-ticker.C:
-				configs, err := s.ListServiceConfigs(ctx, "")
-				if err != nil {
-					slog.Error("获取吊销服务配置失败", "error", err)
-					continue
-				}
-				for _, cfg := range configs {
-					if cfg.ServiceType == "crl" && cfg.Enabled {
-						if _, err := s.RefreshCRL(ctx, cfg.CAUUID); err != nil {
-							slog.Error("刷新 CRL 失败",
-								"ca_uuid", cfg.CAUUID, "error", err)
-						} else {
-							slog.Debug("CRL 已刷新", "ca_uuid", cfg.CAUUID)
-						}
-					}
-				}
+				s.syncSchedulers(ctx)
 			}
 		}
 	}()
+}
+
+// syncSchedulers 按 revocation_services 表状态同步各 CA 的独立调度器。
+// - 配置新增：启动调度器
+// - 配置禁用/删除：停止调度器
+// - CRLInterval 变更：停止旧调度器、重建新调度器
+func (s *Service) syncSchedulers(ctx context.Context) {
+	configs, err := s.ListServiceConfigs(ctx, "")
+	if err != nil {
+		slog.Error("加载吊销服务配置失败", "error", err)
+		return
+	}
+
+	// 1. 收集当前启用的 CRL 配置（caUUID -> 最小间隔）
+	// 若同一 CA 有多条 CRL 配置，取最小间隔作为调度周期，保证按最频繁的配置刷新
+	desired := make(map[string]int)
+	for _, cfg := range configs {
+		if cfg.ServiceType != "crl" || !cfg.Enabled {
+			continue
+		}
+		interval := cfg.CRLInterval
+		if interval <= 0 {
+			interval = 60
+		}
+		if prev, ok := desired[cfg.CAUUID]; !ok || interval < prev {
+			desired[cfg.CAUUID] = interval
+		}
+	}
+
+	s.schedulersMu.Lock()
+	defer s.schedulersMu.Unlock()
+
+	// 2. 停止已不存在或间隔变更的调度器
+	for caUUID, sched := range s.schedulers {
+		newInterval, keep := desired[caUUID]
+		if !keep || sched.interval != newInterval {
+			sched.cancel()
+			delete(s.schedulers, caUUID)
+			slog.Info("CRL 调度器已停止", "ca_uuid", caUUID, "reason", ternary(!keep, "配置已移除", "间隔变更"))
+		}
+	}
+
+	// 3. 启动新的调度器
+	for caUUID, interval := range desired {
+		if _, exists := s.schedulers[caUUID]; exists {
+			continue
+		}
+		schedCtx, cancel := context.WithCancel(ctx)
+		s.schedulers[caUUID] = &crlScheduler{
+			cancel:   cancel,
+			interval: interval,
+		}
+		go s.runCRLScheduler(schedCtx, caUUID, interval)
+		slog.Info("CRL 调度器已启动", "ca_uuid", caUUID, "interval_min", interval)
+	}
+}
+
+// runCRLScheduler 单个 CA 的 CRL 刷新调度器 goroutine。
+// 启动后立即刷新一次，随后按 intervalMinutes 分钟周期刷新，直至 ctx 被取消。
+func (s *Service) runCRLScheduler(ctx context.Context, caUUID string, intervalMinutes int) {
+	// 立即刷新一次
+	if _, err := s.RefreshCRL(ctx, caUUID); err != nil {
+		slog.Error("CRL 初始刷新失败", "ca_uuid", caUUID, "error", err)
+	} else {
+		slog.Debug("CRL 已刷新", "ca_uuid", caUUID)
+	}
+
+	ticker := time.NewTicker(time.Duration(intervalMinutes) * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := s.RefreshCRL(ctx, caUUID); err != nil {
+				slog.Error("CRL 定时刷新失败", "ca_uuid", caUUID, "error", err)
+				continue
+			}
+			slog.Debug("CRL 已刷新", "ca_uuid", caUUID)
+		}
+	}
+}
+
+// stopAllSchedulers 停止所有子调度器（主 loop 退出时调用）。
+func (s *Service) stopAllSchedulers() {
+	s.schedulersMu.Lock()
+	defer s.schedulersMu.Unlock()
+	for caUUID, sched := range s.schedulers {
+		sched.cancel()
+		delete(s.schedulers, caUUID)
+	}
+}
+
+// ternary 简易三元运算（仅用于日志）。
+func ternary(cond bool, a, b string) string {
+	if cond {
+		return a
+	}
+	return b
 }
 
 func boolToInt(b bool) int {
@@ -207,4 +313,64 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// CreateOCSPResponseDER 接收 RFC 6960 OCSP 请求 DER，查询状态并生成已签名的 OCSP 响应 DER。
+// 适配 POST application/ocsp-request 和 GET base64 两种传输方式。
+// 若请求包含多个 SingleRequest，仅响应第一个（符合 RFC 6960 多数实现惯例）。
+func (s *Service) CreateOCSPResponseDER(ctx context.Context, caUUID string, reqDER []byte) ([]byte, error) {
+	ocspReq, err := ocsp.ParseRequest(reqDER)
+	if err != nil {
+		return nil, fmt.Errorf("解析 OCSP 请求失败: %w", err)
+	}
+
+	// 获取 CA 证书和私钥（用于签名响应）
+	caCert, caSigner, err := s.caSvc.GetCAKeypair(ctx, caUUID)
+	if err != nil {
+		return nil, fmt.Errorf("获取 CA 密钥对失败: %w", err)
+	}
+
+	// 按十六进制序列号查询吊销状态（与 revoked_certs 表存储格式一致）
+	serialHex := strings.ToUpper(hex.EncodeToString(ocspReq.SerialNumber.Bytes()))
+	// 兼容短前导零：先尝试十进制再试十六进制
+	serialDec := ocspReq.SerialNumber.String()
+
+	now := time.Now()
+	resp := ocsp.Response{
+		Status:       ocsp.Good,
+		SerialNumber: new(big.Int).Set(ocspReq.SerialNumber),
+		ThisUpdate:   now,
+		NextUpdate:   now.Add(1 * time.Hour),
+	}
+
+	var revokedAt sql.NullTime
+	var reason int
+	err = s.db.QueryRowContext(ctx,
+		`SELECT revoked_at, reason FROM revoked_certs
+		 WHERE ca_uuid = ? AND (serial_number = ? OR serial_number = ? OR serial_hex = ?)`,
+		caUUID, serialHex, serialDec, serialHex,
+	).Scan(&revokedAt, &reason)
+
+	switch {
+	case err == sql.ErrNoRows:
+		resp.Status = ocsp.Good
+	case err != nil:
+		return nil, fmt.Errorf("查询吊销状态失败: %w", err)
+	default:
+		resp.Status = ocsp.Revoked
+		if revokedAt.Valid {
+			resp.RevokedAt = revokedAt.Time
+		} else {
+			resp.RevokedAt = now
+		}
+		resp.RevocationReason = reason
+	}
+
+	// CreateResponse(issuer, responder, template, signer)
+	// responder 使用 CA 证书本身（Responder ID = CA），符合 RFC 6960 B 模式
+	der, err := ocsp.CreateResponse(caCert, caCert, resp, caSigner.(crypto.Signer))
+	if err != nil {
+		return nil, fmt.Errorf("签名 OCSP 响应失败: %w", err)
+	}
+	return der, nil
 }

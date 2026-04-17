@@ -21,7 +21,7 @@ func verifyPassword(password, hash string) bool {
 	return cryptoutil.VerifyPassword(password, hash)
 }
 
-// createLocalCard 创建本地智能卡（封装 local.CreateCard）。
+// createLocalCard 创建本地智能卡（保留作兼容封装；新代码推荐直接用 local.CreateCardWithCreds）。
 func createLocalCard(ctx context.Context, cardRepo *storage.CardRepo, userUUID, cardName, userPassword, cardPassword, remark string) (*storage.Card, error) {
 	return local.CreateCard(ctx, cardRepo, userUUID, cardName, userPassword, cardPassword, remark)
 }

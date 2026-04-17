@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/globaltrusts/server-card/internal/auth"
 	"github.com/globaltrusts/server-card/internal/storage"
 )
 
@@ -44,7 +45,7 @@ func (s *Server) handleGetCertOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 非管理员只能查看自己的订单
-	if order.UserUUID != claims.UserUUID && claims.Role != "admin" && claims.Role != "super_admin" {
+	if order.UserUUID != claims.UserUUID && !auth.IsAdmin(claims.Role) {
 		writeError(w, http.StatusForbidden, "无权查看此订单")
 		return
 	}
@@ -89,8 +90,8 @@ func (s *Server) handleCreateCertApplication(w http.ResponseWriter, r *http.Requ
 func (s *Server) handleListCertApplications(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromCtx(r.Context())
 	userUUID := claims.UserUUID
-	if claims.Role == "admin" {
-		userUUID = "" // 管理员查看所有
+	if auth.IsOperatorOrAbove(claims.Role) {
+		userUUID = "" // 管理员/操作员查看所有申请
 	}
 	statusFilter := r.URL.Query().Get("status")
 	page, pageSize := parsePagination(r)

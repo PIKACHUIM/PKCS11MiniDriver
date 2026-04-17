@@ -29,20 +29,20 @@ const menuItems = [
   {
     key: 'group-local',
     icon: <CreditCardOutlined />,
-    label: '智能卡管理',
+    label: '设备管理',
     children: [
-      { key: '/cards', icon: <CreditCardOutlined />, label: '卡片列表' },
-      { key: '/certs', icon: <SafetyCertificateOutlined />, label: '证书管理' },
+      { key: '/cards', icon: <CreditCardOutlined />, label: '智能卡片管理' },
+      { key: '/certs', icon: <SafetyCertificateOutlined />, label: '用户证书管理' },
     ],
   },
   {
     key: 'group-pki',
     icon: <FileProtectOutlined />,
-    label: 'PKI 工具',
+    label: '证书工具',
     children: [
-      { key: '/pki/csr', icon: <KeyOutlined />, label: 'CSR 管理' },
-      { key: '/pki/ca', icon: <BankOutlined />, label: '本地 CA 管理' },
-      { key: '/pki/certs', icon: <FileDoneOutlined />, label: '证书签发' },
+      { key: '/pki/csr', icon: <KeyOutlined />, label: '本地证书申请' },
+      { key: '/pki/ca', icon: <BankOutlined />, label: '本地颁发机构' },
+      { key: '/pki/certs', icon: <FileDoneOutlined />, label: '证书签发管理' },
     ],
   },
   {
@@ -50,7 +50,7 @@ const menuItems = [
     icon: <ClockCircleOutlined />,
     label: '安全凭据',
     children: [
-      { key: '/totp', icon: <ClockCircleOutlined />, label: 'TOTP 验证' },
+      { key: '/totp', icon: <ClockCircleOutlined />, label: 'TOTP验证管理' },
     ],
   },
   {
@@ -58,16 +58,16 @@ const menuItems = [
     icon: <ApiOutlined />,
     label: '云端功能',
     children: [
-      { key: '/users', icon: <UserOutlined />, label: '云端账号' },
+      { key: '/users', icon: <UserOutlined />, label: '云端账号管理' },
     ],
   },
   {
     key: 'group-system',
     icon: <SettingOutlined />,
-    label: '系统',
+    label: '系统管理',
     children: [
-      { key: '/logs', icon: <FileTextOutlined />, label: '操作日志' },
-      { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
+      { key: '/logs', icon: <FileTextOutlined />, label: '平台操作日志' },
+      { key: '/settings', icon: <SettingOutlined />, label: '平台系统设置' },
     ],
   },
 ];

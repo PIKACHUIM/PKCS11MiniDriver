@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/globaltrusts/server-card/internal/auth"
 	"github.com/globaltrusts/server-card/internal/storage"
 )
 
@@ -15,7 +16,7 @@ import (
 func (s *Server) handleListSubjectInfos(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromCtx(r.Context())
 	userUUID := claims.UserUUID
-	if claims.Role == "admin" {
+	if auth.IsAdmin(claims.Role) {
 		if q := r.URL.Query().Get("user_uuid"); q != "" {
 			userUUID = q
 		}
@@ -61,7 +62,7 @@ func (s *Server) handleDeleteSubjectInfo(w http.ResponseWriter, r *http.Request)
 			break
 		}
 	}
-	if !found && claims.Role != "admin" {
+	if !found && !auth.IsAdmin(claims.Role) {
 		writeError(w, http.StatusForbidden, "无权删除此主体信息")
 		return
 	}

@@ -90,6 +90,8 @@ func main() {
 
 	// 启动 REST API 服务
 	apiServer := api.NewServer(&cfg.API, manager, db)
+	// 注入 IPC 广播回调：卡片增删改后会通知 pkcs11-mock 重新枚举 slot
+	apiServer.SetIPCBroadcaster(ipcServer.BroadcastSlotChanged)
 	if err := apiServer.Start(); err != nil {
 		slog.Error("启动 REST API 服务失败", "error", err)
 		os.Exit(1)

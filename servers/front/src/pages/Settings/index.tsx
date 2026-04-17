@@ -37,7 +37,7 @@ const StorageZoneTab: React.FC = () => {
   const [storageType, setStorageType] = useState('database');
   const [form] = Form.useForm();
 
-  const load = async () => { setLoading(true); try { setData(await listStorageZones()); } catch {} finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { const r = await listStorageZones(); setData(Array.isArray(r) ? r : (r as any).items || []); } catch {} finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
 
   const columns = [
@@ -90,7 +90,7 @@ const OIDTab: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
 
-  const load = async () => { setLoading(true); try { setData(await listOIDs()); } catch {} finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { const r = await listOIDs(); setData(Array.isArray(r) ? r : (r as any).items || []); } catch {} finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
 
   const columns = [
@@ -148,7 +148,7 @@ const RevocationTab: React.FC = () => {
   const [cas, setCAs] = useState<CA[]>([]);
   const [form] = Form.useForm();
 
-  const load = async () => { setLoading(true); try { setData(await listRevocationServices()); } catch {} finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { const r = await listRevocationServices(); setData(Array.isArray(r) ? r : (r as any).items || []); } catch {} finally { setLoading(false); } };
   useEffect(() => {
     load();
     listCAs({ page: 1, page_size: 100 }).then(r => setCAs(r.items || [])).catch(() => {});
@@ -208,7 +208,7 @@ const ACMETab: React.FC = () => {
   const [cas, setCAs] = useState<CA[]>([]);
   const [form] = Form.useForm();
 
-  const load = async () => { setLoading(true); try { setData(await listACMEConfigs()); } catch {} finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { const r = await listACMEConfigs(); setData(Array.isArray(r) ? r : (r as any).items || []); } catch {} finally { setLoading(false); } };
   useEffect(() => {
     load();
     listCAs({ page: 1, page_size: 100 }).then(r => setCAs(r.items || [])).catch(() => {});

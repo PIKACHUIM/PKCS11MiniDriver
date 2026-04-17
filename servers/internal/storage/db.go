@@ -175,6 +175,13 @@ func (db *DB) alterTables() error {
 	db.execIgnoreError(`ALTER TABLE cert_orders ADD COLUMN cert_apply_tmpl_uuid TEXT NOT NULL DEFAULT ''`)
 	db.execIgnoreError(`ALTER TABLE cert_orders ADD COLUMN frozen_cents INTEGER NOT NULL DEFAULT 0`)
 
+	// extension_templates 表：增加 verify_expires_days（验证有效期天数，默认 90）
+	db.execIgnoreError(`ALTER TABLE extension_templates ADD COLUMN verify_expires_days INTEGER NOT NULL DEFAULT 90`)
+
+	// extension_infos 表：增加 tmpl_uuid（关联扩展信息模板）和 verify_code_hash（6 位验证码的 SHA-256）
+	db.execIgnoreError(`ALTER TABLE extension_infos ADD COLUMN tmpl_uuid TEXT NOT NULL DEFAULT ''`)
+	db.execIgnoreError(`ALTER TABLE extension_infos ADD COLUMN verify_code_hash TEXT NOT NULL DEFAULT ''`)
+
 	return nil
 }
 

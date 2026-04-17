@@ -17,6 +17,7 @@ type Config struct {
 	Database DatabaseConfig `yaml:"database"`
 	Log      LogConfig      `yaml:"log"`
 	Tray     TrayConfig     `yaml:"tray"`
+	Client   ClientConfig   `yaml:"client"`
 }
 
 // IPCConfig 是与 pkcs11-mock 通信的 IPC 配置。
@@ -56,6 +57,25 @@ type TrayConfig struct {
 	Icon    string `yaml:"icon"`
 }
 
+// ClientConfig 是前端/Electron/集成相关的可运行时修改的配置项。
+// 这些字段通过 GET/PUT /api/settings 暴露给 UI 进行动态调整，修改后写回 config.yaml。
+type ClientConfig struct {
+	// 通用
+	Language       string `yaml:"language"`         // zh-CN / en-US
+	Theme          string `yaml:"theme"`            // light / dark / system
+	CloseToTray    bool   `yaml:"close_to_tray"`    // 关闭窗口时最小化到托盘
+	// 云端
+	DefaultCloudURL      string `yaml:"default_cloud_url"`       // 新增云端账号时默认填充
+	AllowInsecureCloud   bool   `yaml:"allow_insecure_cloud"`    // 是否允许 http://
+	AutoSync             bool   `yaml:"auto_sync"`               // 是否自动同步
+	SyncIntervalMinutes  int    `yaml:"sync_interval_minutes"`   // 自动同步间隔（分钟），默认 5
+	// 集成
+	RegisterPKCS11Mock bool `yaml:"register_pkcs11_mock"` // 是否让 Electron 主进程把 pkcs11-mock 注册到系统
+	// 安全
+	SessionExpiresMinutes int  `yaml:"session_expires_minutes"` // 会话过期（分钟），默认 1440
+	DetailedRequestLog    bool `yaml:"detailed_request_log"`    // 是否记录详细请求日志
+}
+
 // DefaultConfig 返回默认配置。
 func DefaultConfig() *Config {
 	return &Config{
@@ -80,6 +100,18 @@ func DefaultConfig() *Config {
 		},
 		Tray: TrayConfig{
 			Enabled: true,
+		},
+		Client: ClientConfig{
+			Language:              "zh-CN",
+			Theme:                 "system",
+			CloseToTray:           true,
+			DefaultCloudURL:       "",
+			AllowInsecureCloud:    false,
+			AutoSync:              false,
+			SyncIntervalMinutes:   5,
+			RegisterPKCS11Mock:    false,
+			SessionExpiresMinutes: 1440,
+			DetailedRequestLog:    false,
 		},
 	}
 }
@@ -131,9 +163,13 @@ func defaultConfigPath() string {
 	return filepath.Join(userDataDir(), "config.yaml")
 }
 
-// defaultDBPath 返回默认数据库文件路径（相对于程序运行目录）。
+// defaultDBPath 返回默认数据库文件路径（可执行文件所在目录的 data 子目录）。
 func defaultDBPath() string {
-	return filepath.Join("data", "clients.db")
+	exe, err := os.Executable()
+	if err != nil {
+		return filepath.Join("data", "clients.db")
+	}
+	return filepath.Join(filepath.Dir(exe), "data", "clients.db")
 }
 
 // userDataDir 返回用户数据目录。

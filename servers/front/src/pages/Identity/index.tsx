@@ -39,7 +39,7 @@ const SubjectInfoTab: React.FC = () => {
 
   useEffect(() => {
     load();
-    listSubjectTemplates().then(setTemplates).catch(() => {});
+    listSubjectTemplates().then(res => setTemplates(Array.isArray(res) ? res : [])).catch(() => {});
   }, []);
 
   const handleCreate = async (values: any) => {

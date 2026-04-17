@@ -313,6 +313,7 @@ type ExtensionTemplate struct {
 	MaxURI         int       `json:"max_uri"`          // URI 最大数量
 	RequireDNSVerify  bool   `json:"require_dns_verify"`  // DNS 是否需要验证
 	RequireEmailVerify bool  `json:"require_email_verify"` // 邮箱是否需要验证
+	VerifyExpiresDays  int   `json:"verify_expires_days"`  // 验证有效期（天，默认 90）
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
@@ -411,10 +412,12 @@ type SubjectInfo struct {
 type ExtensionInfo struct {
 	UUID           string     `json:"uuid"`
 	UserUUID       string     `json:"user_uuid"`
+	TmplUUID       string     `json:"tmpl_uuid,omitempty"` // 关联的扩展信息模板 UUID
 	InfoType       string     `json:"info_type"`       // domain/email/ip
 	Value          string     `json:"value"`           // 域名/邮箱/IP 值
 	VerifyMethod   string     `json:"verify_method"`   // txt/http/email
 	VerifyToken    string     `json:"verify_token"`    // 验证 token
+	VerifyCodeHash string     `json:"-"`               // 邮箱验证码的 SHA-256（仅 email 使用）
 	VerifyStatus   string     `json:"verify_status"`   // pending/verified/expired
 	VerifiedAt     *time.Time `json:"verified_at,omitempty"`
 	ExpiresAt      *time.Time `json:"expires_at,omitempty"` // 验证有效期

@@ -1,0 +1,127 @@
+# ================================================================================
+# OID:						short name:					long name
+# ================================================================================
+# Core Usage -------------------------------------------------------------------------------------
+2.5.29.32.0:				anyPolicy:					Any Policy
+2.5.29.37.0:				anyExtendedUsage:			Any Extended Usage
+# Subject Extend ---------------------------------------------------------------------------------
+2.5.4.17:					postalCode:					postalCode
+2.5.4.9:					streetAddress:				streetAddress
+2.5.4.5:					serialNumber:				serialNumber
+2.5.4.15:					businessCategory:			businessCategory
+2.5.4.44:					generationQualifier:		Generation Qualifier
+2.5.4.45:					x500UniqueIdentifier:		x500 Unique Identifier
+2.5.4.65:					pseudonym:					Pseudonym(Other Name)
+0.2.262.1.10.7.20:			nameDistinguisher: 			Name distinguisher
+# MS Extend ---------------------------------------------------------------------------------------
+1.3.6.1.4.1.311.60.2.1.1:	IncLocalityName: 			Inc Locality Name
+1.3.6.1.4.1.311.60.2.1.2:	IncStateOrProvinceName: 	Inc Province Name
+1.3.6.1.4.1.311.60.2.1.3: 	IncCountryName: 			Inc CountryName
+# EV Extend ---------------------------------------------------------------------------------------
+2.23.140.1.1:				evExtend:					Extended Validation (EV) Extend
+2.23.140.1.3:				EVSign:						Extended Validation (EV) Code Signing
+# CFCA Extend -------------------------------------------------------------------------------------
+2.16.156.112554.3:			EVServer:					Extended Validation (EV) Server Cert
+# Netscape Extend ---------------------------------------------------------------------------------
+2.16.840.1.113730.1:		selfEV:						Certificates EV Extend
+2.16.840.1.113730.4.1:		exportApproved:				Certificates EV Export Approved
+# SSL ---------------------------------------------------------------------------------------------
+1.3.6.1.5.5.7.3.1:			  serverAuth:					[SSL3] Server Auth
+1.3.6.1.5.5.7.3.2:			  clientAuth:					[SSL3] Client Auth
+# Code Sign ---------------------------------------------------------------------------------------
+1.3.6.1.5.5.7.3.3:			  codeSigning:				[Code] Code Signing
+2.23.140.1.4.1:				    ptcsc:						  [Code] Publicly-Trusted Code Signing Certificates
+1.3.6.1.4.1.311.61.1.1:		msKernSign:				  [Code] Microsoft Kernel Coding Signing
+1.3.6.1.4.1.311.10.3.39:	msEVWHQL:					  [Code] Microsoft EV WHQL Verification
+1.3.6.1.4.1.311.10.3.5:		msWHQL:						  [Code] Microsoft SYS WHQL Verification
+1.3.6.1.4.1.311.10.3.7:		msWHQLOEM:				  [Code] Microsoft OEM WHQL Verification
+1.3.6.1.4.1.311.10.3.6:		msNT5C:						  [Code] Microsoft NTSystem Component Verification
+1.3.6.1.4.1.311.10.3.8:		msENTC:						  [Code] Microsoft Embedded Component Verification
+# Email Sign --------------------------------------------------------------------------------------
+1.3.6.1.5.5.7.3.4:			  emailProtection:		[Mail] Email Protection
+1.3.6.1.4.1.311.21.19:		msDSER:						  [Mail] Microsoft DS Email Replication
+# Document Signing --------------------------------------------------------------------------------
+1.2.840.113583.1.1.5:		adobePDFSigning:			[Docs] Adobe PDF Signing
+1.3.6.1.4.1.311.10.3.12:	msofficeSigning:		[Docs] Microsoft Office Signing
+# IPSEC -------------------------------------------------------------------------------------------
+1.3.6.1.5.5.7.3.5:			ipsecEndSystem:				[IPSE] IP Security End Entity
+1.3.6.1.5.5.7.3.6:			ipsecTunnel:				  [IPSE] IP Security Tunnel
+#1.3.6.1.5.5.7.3.7:			ipsecUser					    [IPSE] IP Security User
+1.3.6.1.5.5.8.2.2:			iKEIntermediate: 			[IPSE] IP security end entity
+1.3.6.1.5.5.7.3.17:			ipsecIKE:					    [IPSE] IP Security IKE Tunnel
+# CA Server ---------------------------------------------------------------------------------------
+1.3.6.1.5.5.7.3.8:			timeStamping:				  [Time] Time Stamping
+1.3.6.1.5.5.7.3.9:			OCSPSigning:				  [OCSP] OCSP Signing
+# SCVP --------------------------------------------------------------------------------------------
+1.3.6.1.5.5.7.3.10:			pkixKeyPurpose:				PKIX Key Purpose
+1.3.6.1.5.5.7.3.11:			sbgpCertAAServerAuth:	SBGP Cert AAServer Auth
+1.3.6.1.5.5.7.3.12:			scvpRes:					    SCVP Responder
+1.3.6.1.5.5.7.3.15:			SCVPS:						    SCVP Server
+1.3.6.1.5.5.7.3.16:			SCVPC:						    SCVP Client
+# RFC 4334 ----------------------------------------------------------------------------------------
+1.3.6.1.5.2.3.5:        pkInitKDC:      			Signing KDC Response
+1.3.6.1.5.5.7.3.13:			id-kp-eapOverPPP:			EAP Over PPP
+1.3.6.1.5.5.7.3.14:			id-kp-eapOverLAN:			EAP Over LAN
+1.3.6.1.5.5.7.3.18:			CAPWAPAC:					    CAPWAP AC
+1.3.6.1.5.5.7.3.19:			CAPWAPWTP:					  CAPWAP WTP
+1.3.6.1.5.5.7.3.20:			SIP:						      SIP
+# SSH ---------------------------------------------------------------------------------------------
+1.3.6.1.5.5.7.3.21:			sshc:						      [SSH] SSH Client
+1.3.6.1.5.5.7.3.22:			sshs:						      [SSH] SSH Server
+1.3.6.1.5.2.3.4:        pkInitClientAuth:     [SSH] PKINIT Client Auth
+# Send --------------------------------------------------------------------------------------------
+1.3.6.1.5.5.7.3.23:			sendRouter:					  Send Router
+1.3.6.1.5.5.7.3.24:			sendProxy:					  Send Proxy
+1.3.6.1.5.5.7.3.25:			sendOwner:					  Send Owner
+1.3.6.1.5.5.7.3.26:			sendProxyOwner:				Send Proxy Owner
+# CMC ---------------------------------------------------------------------------------------------
+1.3.6.1.5.5.7.3.27:			cmcCA:						    CMC CA Extended Key Usage
+1.3.6.1.5.5.7.3.28:			cmcRA:						    CMC Registration Authorities Key Usage
+1.3.6.1.5.5.7.3.29:			cmcArchive:					  CMC Archive Servers Extended Key Usage
+1.3.6.1.5.5.7.3.30:			BGPSEC:						    BGP SEC
+# MS EFS ------------------------------------------------------------------------------------------
+1.3.6.1.4.1.311.10.3.4:		msEFS:						  [EFS] Microsoft EFS System
+1.3.6.1.4.1.311.10.3.4.1:	msEFSFR:					  [EFS] Microsoft EFS File Recovery
+1.3.6.1.4.1.311.10.3.11:	msKR:						    [EFS] Microsoft Key Recovery
+# MS BitLocker ------------------------------------------------------------------------------------
+1.3.6.1.4.1.311.67.1.1:		driveEncryption:		[Bit] Microsoft BitLocker Drive Encryption
+1.3.6.1.4.1.311.67.1.2:		dataRecoveryAgent:	[Bit] Microsoft BitLocker Data Recovery Agent
+# MS CA -------------------------------------------------------------------------------------------
+1.3.6.1.4.1.311:			msALL:						      [MS CA] Microsoft All Usage
+1.3.6.1.4.1.311.21.1:		MsCaV:						    [MS CA] Microsoft CA Version
+1.3.6.1.4.1.311.21.5:		msCAE:						    [MS CA] Microsoft CA Exchange
+1.3.6.1.4.1.311.21.3:		msCVB:						    [MS CA] Microsoft CRL Virtual Base
+1.3.6.1.4.1.311.21.4:		msCNP:						    [MS CA] Microsoft CRL Next Publish
+1.3.6.1.4.1.311.21.6:		msKRA:						    [MS CA] Microsoft Key Recovery Agent
+1.3.6.1.4.1.311.21.2:		msCPCH:						    [MS CA] Microsoft Certsrv Previous Cert Hash
+1.3.6.1.4.1.311.21.10:		msACP:					    [MS CA] Microsoft Application Certificate Policy
+1.3.6.1.4.1.311.10.3.3:		msSGC:					    [MS CA] Microsoft Server Gated Crypto
+# MS CA Signing -----------------------------------------------------------------------------------
+1.3.6.1.4.1.311.10.3.1:		msCTLSign:					[MS CA] Microsoft CTL Signing
+1.3.6.1.4.1.311.10.3.2:		msTSS:						  [MS CA] Microsoft Time Stamp Signing
+1.3.6.1.4.1.311.10.3.9:		msRLS:						  [MS CA] Microsoft Root List Signer
+1.3.6.1.4.1.311.10.3.10:	msQS:						    [MS CA] Microsoft Qualified Subordination
+1.3.6.1.4.1.311.10.3.13:	msLSV:						  [MS CA] Microsoft Lifetime Signing	
+# MS OBJ Signing ----------------------------------------------------------------------------------
+1.3.6.1.4.1.311.2.1.21:		msCodeInd:					[MS OS] Microsoft Individual Object Signing
+1.3.6.1.4.1.311.2.1.22:		msCodeCom:					[MS OS] Microsoft Commercial Object Signing
+# MS Media -----------------------------------------------------------------------------------------
+1.3.6.1.4.1.311.10.5.1:		msDRM:						  [MS ME] Microsoft Digtial Right Verification
+1.3.6.1.4.1.311.10.6.1:		msL:						    [MS ME] Microsoft Licenses Client
+1.3.6.1.4.1.311.10.6.2:		msLS:						    [MS ME] Microsoft Licenses Server
+# MS AD --------------------------------------------------------------------------------------------
+1.3.6.1.4.1.311.20.2:		dom:						      [MS AD] Microsoft Domain Controller
+1.3.6.1.4.1.311.20.2.1:		msEA:						    [MS AD] Microsoft Enrollment Agent
+1.3.6.1.4.1.311.20.2.2:		msSmartcardLogin:		[MS AD] Microsoft Smart Card Logon
+1.3.6.1.4.1.311.20.2.3:		msUPN:						  [MS AD] Microsoft Universal Principal Name
+# Pika ---------------------------------------------------------------------------------------------
+1.3.6.1.4.1.37476.9000.173:	pikaRootCA:					[Pika] Pikachu Root CA
+1.3.6.1.4.1.37476.9000.173.1:	pikaExtended:					[Pika] Pikachu Extended Validation
+# MS EK --------------------------------------------------------------------------------------------
+1.3.6.1.4.1.311.21.30: ekVerified:					[MS CA] Microsoft EK Verified
+1.3.6.1.4.1.311.21.31: ekCertVerified:					[MS CA] Microsoft EK Certificate Verified
+1.3.6.1.4.1.311.21.32: ekUserVerified:					[MS CA] Microsoft EK User Trusted Verified
+
+
+
+

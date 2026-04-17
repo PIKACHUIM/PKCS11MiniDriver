@@ -182,6 +182,8 @@ func (s *Server) handleACMEGetAuthorization(w http.ResponseWriter, r *http.Reque
 }
 
 // handleACMEChallenge 触发 ACME 挑战验证。
+// 按 RFC 8555 §7.5.1，客户端 POST 空对象到挑战 URL 以触发服务器执行验证。
+// 本实现同步执行 HTTP-01 / DNS-01 真实验证（带 15s 超时），并在成功后推进订单到 ready。
 func (s *Server) handleACMEChallenge(w http.ResponseWriter, r *http.Request) {
 	if s.acmeSvc == nil {
 		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
@@ -193,27 +195,85 @@ func (s *Server) handleACMEChallenge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	// 触发验证（异步）
-	go func() {
-		s.acmeSvc.ValidateChallenge(r.Context(), id) //nolint:errcheck
-	}()
+
+	// 从 Authorization 读取 identifier，提取域名
+	var identifierJSON string
+	if err := s.db.QueryRowContext(r.Context(),
+		`SELECT identifier FROM acme_authorizations WHERE uuid = ?`, chall.AuthzUUID,
+	).Scan(&identifierJSON); err != nil {
+		writeError(w, http.StatusNotFound, "找不到挑战对应的授权")
+		return
+	}
+	var ident struct {
+		Type  string `json:"type"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(identifierJSON), &ident); err != nil {
+		writeError(w, http.StatusInternalServerError, "解析 identifier 失败")
+		return
+	}
+	if ident.Type != "dns" {
+		writeError(w, http.StatusBadRequest, "仅支持 dns 类型标识符")
+		return
+	}
+
+	// 可选：从请求体取 keyAuthorization（客户端提供）；为空则放宽为 token 前缀匹配
+	var payload struct {
+		KeyAuthorization string `json:"keyAuthorization"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+
+	// 同步执行真实验证
+	verr := s.acmeSvc.ValidateChallengeReal(r.Context(), id, ident.Value, payload.KeyAuthorization)
+	// 重新读取以返回最新状态
+	chall, _ = s.acmeSvc.GetChallenge(r.Context(), id)
+	if verr != nil {
+		writeJSON(w, http.StatusOK, chall) // RFC 建议即使失败也返回 200 + invalid 状态
+		return
+	}
 	writeJSON(w, http.StatusOK, chall)
 }
 
-// handleACMEFinalize 完成 ACME 订单（提交 CSR 签发证书）。
+// handleACMEFinalize 完成 ACME 订单：解析 CSR 并调用 CA 签发。
+// 请求体：{"csr":"<base64url(DER)>"}（RFC 8555 §7.4）。
 func (s *Server) handleACMEFinalize(w http.ResponseWriter, r *http.Request) {
 	if s.acmeSvc == nil {
 		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
 		return
 	}
 	id := r.PathValue("id")
+
+	var payload struct {
+		CSR string `json:"csr"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if payload.CSR == "" {
+		writeError(w, http.StatusBadRequest, "缺少 csr 字段")
+		return
+	}
+	// base64url 解码 CSR
+	csrDER, err := base64URLDecode(payload.CSR)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "CSR 解码失败: "+err.Error())
+		return
+	}
+
+	// 同步签发（若成功，订单状态变为 valid，cert_url 指向签发的证书序列号）
+	_, err = s.acmeSvc.FinalizeOrder(r.Context(), id, csrDER)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// 返回最新订单状态
 	order, err := s.acmeSvc.GetOrder(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	// 更新订单状态为处理中
-	s.acmeSvc.UpdateOrderStatus(r.Context(), id, "processing", "") //nolint:errcheck
 	writeJSON(w, http.StatusOK, order)
 }
 
@@ -241,17 +301,30 @@ func (s *Server) handleACMEGetCertificate(w http.ResponseWriter, r *http.Request
 // ---- CT 处理器 ----
 
 // handleCTSubmit 接受证书 CT 提交请求。
+// 认证方式：Header "Authorization: Bearer <CT_SUBMIT_TOKEN>"，Token 由 configs.CT.SubmitToken 配置。
+// 若未配置 Token 则视为公开接口（仅开发环境使用）。
 func (s *Server) handleCTSubmit(w http.ResponseWriter, r *http.Request) {
 	if s.ctSvc == nil {
 		writeError(w, http.StatusServiceUnavailable, "CT 服务未启用")
 		return
 	}
+
+	// 认证：如果配置了 SubmitToken，则要求 Bearer Token 匹配
+	if s.cfg.CT.SubmitToken != "" {
+		token := extractBearerToken(r)
+		if token == "" || token != s.cfg.CT.SubmitToken {
+			writeError(w, http.StatusUnauthorized, "CT 提交需要有效的 Bearer Token")
+			return
+		}
+	}
+
 	var req struct {
-		CertUUID    string `json:"cert_uuid"`
-		CAUUID      string `json:"ca_uuid"`
-		CTServer    string `json:"ct_server"`
-		SubmittedBy string `json:"submitted_by"`
-		CertDER     []byte `json:"cert_der"` // base64 编码的 DER 数据
+		CertUUID    string   `json:"cert_uuid"`
+		CAUUID      string   `json:"ca_uuid"`
+		CTServer    string   `json:"ct_server"`
+		SubmittedBy string   `json:"submitted_by"`
+		CertDER     []byte   `json:"cert_der"`  // base64 编码的 DER 数据
+		ChainDER    [][]byte `json:"chain_der"` // 可选：签发 CA 链（base64 编码的 DER 数组）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式错误")
@@ -261,8 +334,16 @@ func (s *Server) handleCTSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "cert_uuid 和 ct_server 不能为空")
 		return
 	}
-	entry, err := s.ctSvc.Submit(r.Context(), req.CertUUID, req.CAUUID, req.CTServer, req.SubmittedBy, req.CertDER)
+	entry, err := s.ctSvc.Submit(r.Context(), req.CertUUID, req.CAUUID, req.CTServer, req.SubmittedBy, req.CertDER, req.ChainDER)
 	if err != nil {
+		// 即便 CT 提交失败，entry 已被保存为 failed 状态，返回 502 但含 entry 数据供排查
+		if entry != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{
+				"error": err.Error(),
+				"entry": entry,
+			})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

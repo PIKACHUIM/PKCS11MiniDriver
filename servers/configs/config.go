@@ -14,8 +14,30 @@ type Config struct {
 	Database       DatabaseConfig
 	JWT            JWTConfig
 	Log            LogConfig
+	SMTP           SMTPConfig
+	CT             CTConfig
 	AllowedOrigins []string // CORS 允许的来源列表
 	MasterKeyFile  string   // 主密钥文件路径（优先使用环境变量 SERVER_CARD_MASTER_KEY）
+}
+
+// CTConfig 是证书透明度（CT）配置。
+type CTConfig struct {
+	// SubmitToken 是 CT 提交接口（POST /ct/submit）的 Bearer Token。
+	// 为空时表示接口公开（仅开发环境使用）；生产环境必须设置。
+	SubmitToken string
+}
+
+// SMTPConfig 是 SMTP 邮件发送配置。
+// 当 Enabled=false（默认）时，邮箱验证码直接记入日志，不真实发送（便于本地开发）。
+type SMTPConfig struct {
+	Enabled  bool   // 是否启用真实 SMTP 发送
+	Host     string // SMTP 服务器主机（如 smtp.gmail.com）
+	Port     int    // SMTP 端口（25/465/587）
+	Username string // 登录用户名
+	Password string // 登录密码（或 App 专用密码）
+	From     string // 发件人邮箱（如 noreply@example.com）
+	FromName string // 发件人显示名称
+	UseTLS   bool   // 是否使用 STARTTLS
 }
 
 // APIConfig 是 HTTP API 配置。
@@ -74,6 +96,19 @@ func Load() *Config {
 		},
 		Log: LogConfig{
 			Level: getEnv("SERVER_CARD_LOG_LEVEL", "info"),
+		},
+		SMTP: SMTPConfig{
+			Enabled:  getEnv("SERVER_CARD_SMTP_ENABLED", "false") == "true",
+			Host:     getEnv("SERVER_CARD_SMTP_HOST", ""),
+			Port:     getEnvInt("SERVER_CARD_SMTP_PORT", 587),
+			Username: getEnv("SERVER_CARD_SMTP_USERNAME", ""),
+			Password: getEnv("SERVER_CARD_SMTP_PASSWORD", ""),
+			From:     getEnv("SERVER_CARD_SMTP_FROM", ""),
+			FromName: getEnv("SERVER_CARD_SMTP_FROM_NAME", "OpenCert"),
+			UseTLS:   getEnv("SERVER_CARD_SMTP_TLS", "true") == "true",
+		},
+		CT: CTConfig{
+			SubmitToken: getEnv("SERVER_CARD_CT_SUBMIT_TOKEN", ""),
 		},
 		AllowedOrigins: allowedOrigins,
 		MasterKeyFile:  getEnv("SERVER_CARD_MASTER_KEY_FILE", ""),

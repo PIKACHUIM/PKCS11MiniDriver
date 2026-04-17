@@ -5,7 +5,7 @@ interface AuthState {
   token: string | null;
   userUUID: string | null;
   username: string | null;
-  role: 'admin' | 'user' | 'readonly' | null;
+  role: 'super_admin' | 'admin' | 'operator' | 'user' | 'readonly' | null;
   isAuthenticated: boolean;
 
   setAuth: (auth: AuthToken) => void;
@@ -19,7 +19,7 @@ function loadFromStorage(): Pick<AuthState, 'token' | 'userUUID' | 'username' | 
   const username = localStorage.getItem('platform_username') || '';
   const roleRaw = localStorage.getItem('platform_role');
   // role 只接受合法值，否则降级为 'user'
-  const validRoles = ['admin', 'user', 'readonly'];
+  const validRoles = ['super_admin', 'admin', 'operator', 'user', 'readonly'];
   const role = (validRoles.includes(roleRaw || '') ? roleRaw : 'user') as AuthState['role'];
   if (token && userUUID) {
     return { token, userUUID, username, role, isAuthenticated: true };

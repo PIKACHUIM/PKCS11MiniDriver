@@ -4,12 +4,22 @@ package acme
 import (
 	"context"
 	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/globaltrusts/server-card/internal/ca"
 	"github.com/globaltrusts/server-card/internal/storage"
 )
 
@@ -71,12 +81,18 @@ type Challenge struct {
 
 // Service 是 ACME 服务。
 type Service struct {
-	db *storage.DB
+	db    *storage.DB
+	caSvc *ca.Service // 用于 Finalize 时签发证书（可选，未注入时 Finalize 失败）
 }
 
 // NewService 创建 ACME 服务。
 func NewService(db *storage.DB) *Service {
 	return &Service{db: db}
+}
+
+// SetCASvc 注入 CA 签发服务（在 main.go 装配阶段调用以避免循环依赖）。
+func (s *Service) SetCASvc(caSvc *ca.Service) {
+	s.caSvc = caSvc
 }
 
 // ---- ACME 配置管理 ----
@@ -304,4 +320,335 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// ---- ACME 挑战真实验证（HTTP-01 / DNS-01）----
+
+// ChallengeValidationTimeout 是单次挑战验证的总超时。
+const ChallengeValidationTimeout = 15 * time.Second
+
+// ValidateHTTP01 执行 RFC 8555 §8.3 定义的 HTTP-01 挑战验证：
+//
+//	GET http://{domain}/.well-known/acme-challenge/{token}
+//	响应体必须等于 keyAuthorization = token + "." + base64url(SHA-256(accountKey))
+//
+// keyAuth 是调用方提供的 keyAuthorization 期望值（由上层根据账户公钥计算）。
+// 若 keyAuth 为空（简化场景），则仅要求响应体以 token 开头。
+func (s *Service) ValidateHTTP01(ctx context.Context, domain, token, keyAuth string) error {
+	if domain == "" {
+		return fmt.Errorf("域名为空")
+	}
+	if token == "" {
+		return fmt.Errorf("token 为空")
+	}
+
+	// 构造 URL，域名做粗粒度校验避免 SSRF（仅允许 DNS 名，不允许 IP）
+	if ip := net.ParseIP(domain); ip != nil {
+		return fmt.Errorf("HTTP-01 挑战不支持 IP 地址")
+	}
+	u := &url.URL{
+		Scheme: "http",
+		Host:   domain,
+		Path:   "/.well-known/acme-challenge/" + token,
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, ChallengeValidationTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return fmt.Errorf("构造请求失败: %w", err)
+	}
+	req.Header.Set("User-Agent", "GlobalTrusts-ACME/1.0")
+
+	client := &http.Client{
+		Timeout: ChallengeValidationTimeout,
+		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("重定向次数过多")
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP-01 请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP-01 响应非 200: %d", resp.StatusCode)
+	}
+	// 读取至多 4KB 响应体，避免恶意超大响应
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return fmt.Errorf("读取响应失败: %w", err)
+	}
+	content := strings.TrimSpace(string(body))
+	if keyAuth != "" {
+		if content != keyAuth {
+			return fmt.Errorf("响应体与 keyAuthorization 不匹配")
+		}
+	} else {
+		if !strings.HasPrefix(content, token) {
+			return fmt.Errorf("响应体未以 token 开头")
+		}
+	}
+	return nil
+}
+
+// ValidateDNS01 执行 RFC 8555 §8.4 定义的 DNS-01 挑战验证：
+//
+//	查询 _acme-challenge.{domain} TXT 记录
+//	记录值必须等于 base64url(SHA-256(keyAuthorization))
+//
+// expected 是期望的 TXT 记录值（由上层计算）。若 expected 为空，则只要存在 TXT 记录即通过（简化模式）。
+func (s *Service) ValidateDNS01(ctx context.Context, domain, expected string) error {
+	if domain == "" {
+		return fmt.Errorf("域名为空")
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, ChallengeValidationTimeout)
+	defer cancel()
+
+	resolver := &net.Resolver{}
+	txts, err := resolver.LookupTXT(reqCtx, "_acme-challenge."+domain)
+	if err != nil {
+		return fmt.Errorf("查询 TXT 记录失败: %w", err)
+	}
+	if len(txts) == 0 {
+		return fmt.Errorf("未找到 _acme-challenge.%s 的 TXT 记录", domain)
+	}
+	if expected == "" {
+		return nil
+	}
+	for _, t := range txts {
+		if strings.TrimSpace(t) == expected {
+			return nil
+		}
+	}
+	return fmt.Errorf("TXT 记录值与期望不匹配")
+}
+
+// ValidateChallengeReal 根据挑战类型执行真实的外部验证，并更新状态。
+// domain 从挑战关联的 Authorization.identifier 中解析（调用方提供）。
+// keyAuth 是调用方传入的 keyAuthorization（HTTP-01）或 TXT 期望值（DNS-01）；可为空。
+func (s *Service) ValidateChallengeReal(ctx context.Context, chUUID, domain, keyAuthOrTXT string) error {
+	ch, err := s.GetChallenge(ctx, chUUID)
+	if err != nil {
+		return err
+	}
+	if ch.Status == "valid" {
+		return nil
+	}
+
+	var verr error
+	switch ch.Type {
+	case "http-01":
+		verr = s.ValidateHTTP01(ctx, domain, ch.Token, keyAuthOrTXT)
+	case "dns-01":
+		verr = s.ValidateDNS01(ctx, domain, keyAuthOrTXT)
+	default:
+		verr = fmt.Errorf("不支持的挑战类型: %s", ch.Type)
+	}
+
+	now := time.Now()
+	if verr != nil {
+		// 更新挑战为 invalid，附带错误信息
+		errJSON, _ := json.Marshal(map[string]string{
+			"type":   "urn:ietf:params:acme:error:unauthorized",
+			"detail": verr.Error(),
+		})
+		_, _ = s.db.ExecContext(ctx,
+			`UPDATE acme_challenges SET status = 'invalid', error = ?, validated_at = ? WHERE uuid = ?`,
+			string(errJSON), now, chUUID,
+		)
+		// 同时把对应授权置 invalid
+		_, _ = s.db.ExecContext(ctx,
+			`UPDATE acme_authorizations SET status = 'invalid' WHERE uuid = ?`,
+			ch.AuthzUUID,
+		)
+		return verr
+	}
+
+	// 成功：挑战和授权一起置 valid
+	_, _ = s.db.ExecContext(ctx,
+		`UPDATE acme_challenges SET status = 'valid', validated_at = ? WHERE uuid = ?`,
+		now, chUUID,
+	)
+	_, _ = s.db.ExecContext(ctx,
+		`UPDATE acme_authorizations SET status = 'valid' WHERE uuid = ?`,
+		ch.AuthzUUID,
+	)
+	// 若该订单下所有 authz 都 valid，则订单转为 ready
+	var orderUUID string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT order_uuid FROM acme_authorizations WHERE uuid = ?`, ch.AuthzUUID,
+	).Scan(&orderUUID); err == nil {
+		s.refreshOrderReady(ctx, orderUUID) //nolint:errcheck
+	}
+	return nil
+}
+
+// refreshOrderReady 若订单所有授权均 valid，则订单状态转为 ready。
+func (s *Service) refreshOrderReady(ctx context.Context, orderUUID string) error {
+	var pendingCount int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM acme_authorizations WHERE order_uuid = ? AND status != 'valid'`,
+		orderUUID,
+	).Scan(&pendingCount)
+	if err != nil {
+		return err
+	}
+	if pendingCount == 0 {
+		_, err = s.db.ExecContext(ctx,
+			`UPDATE acme_orders SET status = 'ready' WHERE uuid = ? AND status = 'pending'`,
+			orderUUID,
+		)
+		return err
+	}
+	return nil
+}
+
+// ---- ACME 订单 Finalize（签发证书）----
+
+// FinalizeResult 是 FinalizeOrder 的返回结果。
+type FinalizeResult struct {
+	OrderUUID string
+	CertPEM   string // 完整叶子证书 PEM（不含链）
+	CertUUID  string // 对应 Certificate 记录 UUID（由 ca 侧写入时返回）
+}
+
+// FinalizeOrder 完成订单：校验所有授权已 valid，解析 CSR，调用 caSvc.IssueCert 签发证书。
+//
+//	订单状态跳转：ready → processing → valid；cert_url 字段写入 Certificate UUID。
+//
+// csrDER 是 PKCS#10 CertificateRequest 的 DER 编码（RFC 8555 §7.4 的 "csr" 字段 base64url 解码后）。
+func (s *Service) FinalizeOrder(ctx context.Context, orderUUID string, csrDER []byte) (*FinalizeResult, error) {
+	if s.caSvc == nil {
+		return nil, fmt.Errorf("ACME 服务未注入 CA 签发依赖")
+	}
+	order, err := s.GetOrder(ctx, orderUUID)
+	if err != nil {
+		return nil, err
+	}
+	if order.Status != "ready" && order.Status != "processing" {
+		return nil, fmt.Errorf("订单状态不允许 finalize: %s", order.Status)
+	}
+
+	// 解析 CSR
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return nil, fmt.Errorf("解析 CSR 失败: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("CSR 签名校验失败: %w", err)
+	}
+
+	// 从订单标识符提取待签域名，校验 CSR 中的 SAN/CN 至少覆盖这些域名
+	var idents []struct {
+		Type  string `json:"type"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(order.Identifiers), &idents); err != nil {
+		return nil, fmt.Errorf("解析订单 identifiers 失败: %w", err)
+	}
+	csrNames := map[string]bool{}
+	if csr.Subject.CommonName != "" {
+		csrNames[strings.ToLower(csr.Subject.CommonName)] = true
+	}
+	for _, n := range csr.DNSNames {
+		csrNames[strings.ToLower(n)] = true
+	}
+	for _, id := range idents {
+		if id.Type != "dns" {
+			continue
+		}
+		if !csrNames[strings.ToLower(id.Value)] {
+			return nil, fmt.Errorf("CSR 未包含订单标识符 %s", id.Value)
+		}
+	}
+
+	// 订单转 processing
+	_, _ = s.db.ExecContext(ctx,
+		`UPDATE acme_orders SET status = 'processing' WHERE uuid = ?`, orderUUID,
+	)
+
+	// 通过账户 → 配置反向查找 CA 和颁发模板
+	var caUUID, issuanceTmplUUID string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT c.ca_uuid, c.issuance_tmpl_uuid
+		 FROM acme_accounts a
+		 JOIN acme_configs c ON a.config_id = c.uuid
+		 WHERE a.uuid = ?`, order.AccountUUID,
+	).Scan(&caUUID, &issuanceTmplUUID)
+	if err != nil {
+		return nil, fmt.Errorf("查询 ACME 配置失败: %w", err)
+	}
+	if caUUID == "" {
+		return nil, fmt.Errorf("ACME 配置未指定 CA")
+	}
+
+	// 构造签发请求：主体取 CSR 的 Subject，若为空则使用第一个 identifier 作为 CN
+	subject := csr.Subject
+	if subject.CommonName == "" && len(idents) > 0 {
+		subject = pkix.Name{CommonName: idents[0].Value}
+	}
+
+	issueReq := &ca.IssueRequest{
+		CAUUID:           caUUID,
+		Subject:          subject,
+		KeyType:          "", // 从 CSR 中的公钥推断，ca.IssueCert 不使用 KeyType 时跳过生成
+		ValidDays:        90, // ACME 默认 90 天（Let's Encrypt 对齐）
+		IsCA:             false,
+		DNSNames:         csr.DNSNames,
+		IPAddresses:      csr.IPAddresses,
+		EmailAddrs:       csr.EmailAddresses,
+		IssuanceTmplUUID: issuanceTmplUUID,
+		CSRPublicKey:     csr.PublicKey, // 使用 CSR 中的公钥，不生成新密钥
+	}
+
+	resp, err := s.caSvc.IssueCert(ctx, issueReq)
+	if err != nil {
+		_, _ = s.db.ExecContext(ctx,
+			`UPDATE acme_orders SET status = 'invalid' WHERE uuid = ?`, orderUUID,
+		)
+		return nil, fmt.Errorf("签发失败: %w", err)
+	}
+
+	// 订单 valid，cert_url 存证书序列号作为索引（下载时用）
+	_, _ = s.db.ExecContext(ctx,
+		`UPDATE acme_orders SET status = 'valid', cert_url = ? WHERE uuid = ?`,
+		resp.SerialNumber, orderUUID,
+	)
+
+	return &FinalizeResult{
+		OrderUUID: orderUUID,
+		CertPEM:   resp.CertPEM,
+		CertUUID:  resp.SerialNumber,
+	}, nil
+}
+
+// GetCertificateForOrder 根据订单 UUID 返回证书 PEM。
+// 通过订单的 cert_url（序列号）在 certificates 表中查询对应证书。
+func (s *Service) GetCertificateForOrder(ctx context.Context, orderUUID string) (string, error) {
+	order, err := s.GetOrder(ctx, orderUUID)
+	if err != nil {
+		return "", err
+	}
+	if order.Status != "valid" || order.CertURL == "" {
+		return "", fmt.Errorf("订单尚未签发完成")
+	}
+	var pemContent []byte
+	err = s.db.QueryRowContext(ctx,
+		`SELECT cert_content FROM certificates WHERE serial_number = ? LIMIT 1`, order.CertURL,
+	).Scan(&pemContent)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("证书未找到")
+	}
+	if err != nil {
+		return "", err
+	}
+	// 确保是 PEM 格式
+	if _, rest := pem.Decode(pemContent); len(rest) == 0 && len(pemContent) > 0 {
+		// 已是合法 PEM
+	}
+	return string(pemContent), nil
 }

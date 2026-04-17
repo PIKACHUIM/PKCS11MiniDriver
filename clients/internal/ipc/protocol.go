@@ -62,6 +62,11 @@ const (
 	CmdInitPIN          CmdCode = 0x0023
 	CmdSetPIN           CmdCode = 0x0024
 	CmdHandshake        CmdCode = 0x00FF // 版本协商命令
+
+	// CmdSlotChanged 是服务端主动推送事件：卡片（Slot）列表发生变化，
+	// 客户端收到后应重置内部 slot 缓存并重新调用 CmdGetSlotList。
+	// 该事件不需要请求/响应配对，服务端可随时向所有已建立的长连接广播。
+	CmdSlotChanged CmdCode = 0x0100
 )
 
 // 协议版本号。
@@ -76,6 +81,13 @@ type HandshakeReq struct {
 type HandshakeResp struct {
 	Version    uint32 `json:"version"`
 	Compatible bool   `json:"compatible"`
+}
+
+// SlotChangedEvent 是 CmdSlotChanged 事件的 payload。
+// Reason 标识变化来源（create/delete/sync 等），便于客户端做差异化处理。
+type SlotChangedEvent struct {
+	Reason    string `json:"reason"`     // create / delete / update / sync
+	Timestamp int64  `json:"timestamp"`  // Unix 秒
 }
 
 // Frame 是 IPC 通信帧。

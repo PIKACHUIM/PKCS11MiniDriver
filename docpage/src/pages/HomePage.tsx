@@ -86,7 +86,7 @@ export default function HomePage() {
             <span className="badge badge-orange">企业级</span>
           </div>
           <h1 className="hero-title animate-fade-in-up delay-2">
-            OpenCert Manager
+            OpenCert Project
           </h1>
           <p className="hero-desc animate-fade-in-up delay-3">
             企业级 CA + 智能卡 + X.509 / GPG / SSH 证书管理平台。

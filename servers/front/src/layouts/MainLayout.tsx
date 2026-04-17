@@ -37,40 +37,40 @@ const MainLayout: React.FC = () => {
 
   // 构建分组菜单
   const menuItems: any[] = [
-    { key: '/dashboard', icon: <DashboardOutlined />, label: '系统概览' },
+    { key: '/dashboard', icon: <DashboardOutlined />, label: '平台概览' },
     {
       key: 'group-mine', icon: <SafetyCertificateOutlined />, label: '证书管理',
       children: [
-        { key: '/certs', icon: <SafetyCertificateOutlined />, label: '我的证书' },
-        { key: '/identity', icon: <IdcardOutlined />, label: '身份信息' },
-        { key: '/cert-orders', icon: <ShoppingOutlined />, label: '证书申请' },
-        { key: '/payment', icon: <WalletOutlined />, label: '支付管理' },
+        { key: '/certs', icon: <SafetyCertificateOutlined />, label: '我的证书管理' },
+        { key: '/identity', icon: <IdcardOutlined />, label: '个人身份信息' },
+        { key: '/cert-orders', icon: <ShoppingOutlined />, label: '证书申请管理' },
+        { key: '/payment', icon: <WalletOutlined />, label: '财务支付管理' },
       ],
     },
     // 平台管理分组仅 admin/super_admin 可见
     ...(isAdmin ? [{
       key: 'group-admin', icon: <ApartmentOutlined />, label: '平台管理',
       children: [
-        { key: '/ca', icon: <ApartmentOutlined />, label: '颁发机构' },
-        { key: '/templates', icon: <AppstoreOutlined />, label: '模板管理' },
-        { key: '/cert-apply-templates', icon: <AppstoreOutlined />, label: '申请模板' },
-        { key: '/users', icon: <UserOutlined />, label: '用户管理' },
-        { key: '/ct-records', icon: <AuditOutlined />, label: 'CT 记录' },
-        { key: '/audit-logs', icon: <FileTextOutlined />, label: '审计日志' },
+        { key: '/ca', icon: <ApartmentOutlined />, label: '证书颁发机构' },
+        { key: '/templates', icon: <AppstoreOutlined />, label: '证书模板管理' },
+        { key: '/cert-apply-templates', icon: <AppstoreOutlined />, label: '证书申请模板' },
+        { key: '/users', icon: <UserOutlined />, label: '平台用户管理' },
+        { key: '/ct-records', icon: <AuditOutlined />, label: '证书透明度CT' },
+        { key: '/audit-logs', icon: <FileTextOutlined />, label: '证书颁发审计' },
       ],
     }] : []),
     // 操作员可见的菜单
     ...(isOperatorOrAbove && !isAdmin ? [{
-      key: 'group-operator', icon: <ApartmentOutlined />, label: '操作管理',
+      key: 'group-operator', icon: <ApartmentOutlined />, label: '证书操作管理',
       children: [
-        { key: '/cert-orders', icon: <ShoppingOutlined />, label: '订单管理' },
+        { key: '/cert-orders', icon: <ShoppingOutlined />, label: '证书订单管理' },
       ],
     }] : []),
     {
       key: 'group-system', icon: <SettingOutlined />, label: '系统管理',
       children: [
-        { key: '/logs', icon: <FileTextOutlined />, label: '操作日志' },
-        { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
+        { key: '/logs', icon: <FileTextOutlined />, label: '全局操作日志' },
+        { key: '/settings', icon: <SettingOutlined />, label: '全局系统设置' },
       ],
     },
   ];
@@ -106,7 +106,7 @@ const MainLayout: React.FC = () => {
             <div>
               <div style={{ color: '#fff', fontWeight: 700, fontSize: 14, lineHeight: 1.2 }}>OpenCert Platform</div>
               <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 11 }}>
-                {role === 'admin' ? '管理员' : '证书管理平台'} · :1027
+                云端平台管理 - {role === 'admin' ? '管理员' : '证书管理平台'}
               </div>
             </div>
           </Space>

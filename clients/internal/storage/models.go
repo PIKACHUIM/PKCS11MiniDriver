@@ -44,13 +44,19 @@ const (
 // CardKeyEntry 是卡片主密钥的一条加密记录。
 // 卡片密码以列表形式存储，支持多用户权限。
 type CardKeyEntry struct {
-	// KeyType 区分是用户密码加密还是卡片密码加密。
-	// "user" = HMAC(用户密码, salt) 加密
-	// "card" = HMAC(设定密码, salt) 加密
+	// KeyType 区分凭据种类：
+	//   "user"  = 用户密码（个人用户多端同步时常见）
+	//   "card"  = 卡片设定密码（所有持卡用户共享）
+	//   "pin"   = 卡片 PIN 码（最常用；与 "card" 同义，保留兼容）
+	//   "puk"   = PUK 解锁码，用于重置 PIN
+	//   "admin" = Admin Key，用于重置 PUK（最高权限）
 	KeyType      string `json:"key_type"`
 	UserUUID     string `json:"user_uuid,omitempty"` // KeyType=user 时有效
 	Salt         []byte `json:"salt"`                // 32 字节随机盐值
-	EncMasterKey []byte `json:"enc_master_key"`      // AES256 加密的主密钥
+	EncMasterKey []byte `json:"enc_master_key"`      // AES256 加密的主密钥副本
+	// 失败/锁定状态（0 值=从未失败；Locked=true 表示该凭据已锁定）
+	Attempts int  `json:"attempts,omitempty"`
+	Locked   bool `json:"locked,omitempty"`
 }
 
 // Card 是卡片数据模型。

@@ -97,7 +97,7 @@ const SubjectTab: React.FC = () => {
   const [fields, setFields] = useState([{ name: '', required: false, default_value: '', max_length: 128 }]);
   const [form] = Form.useForm();
 
-  const load = async () => { setLoading(true); try { setData(await listSubjectTemplates()); } catch {} finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { const r = await listSubjectTemplates(); setData(Array.isArray(r) ? r : (r as any).items || []); } catch {} finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
 
   const columns = [
@@ -153,7 +153,7 @@ const ExtensionTab: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
 
-  const load = async () => { setLoading(true); try { setData(await listExtensionTemplates()); } catch {} finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { const r = await listExtensionTemplates(); setData(Array.isArray(r) ? r : (r as any).items || []); } catch {} finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
 
   const columns = [
@@ -206,7 +206,7 @@ const KeyUsageTab: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
 
-  const load = async () => { setLoading(true); try { setData(await listKeyUsageTemplates()); } catch {} finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { const r = await listKeyUsageTemplates(); setData(Array.isArray(r) ? r : (r as any).items || []); } catch {} finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
 
   const columns = [
@@ -261,7 +261,7 @@ const CertExtTab: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [form] = Form.useForm();
 
-  const load = async () => { setLoading(true); try { setData(await listCertExtTemplates()); } catch {} finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { const r = await listCertExtTemplates(); setData(Array.isArray(r) ? r : (r as any).items || []); } catch {} finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
 
   const columns = [
@@ -326,7 +326,7 @@ const KeyStorageTab: React.FC = () => {
   const [cloudBackup, setCloudBackup] = useState(false);
   const [form] = Form.useForm();
 
-  const load = async () => { setLoading(true); try { setData(await listKeyStorageTemplates()); } catch {} finally { setLoading(false); } };
+  const load = async () => { setLoading(true); try { const r = await listKeyStorageTemplates(); setData(Array.isArray(r) ? r : (r as any).items || []); } catch {} finally { setLoading(false); } };
   useEffect(() => { load(); }, []);
 
   const columns = [

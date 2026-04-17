@@ -35,6 +35,8 @@ type Server struct {
 	csrRepo     *storage.CSRRepo
 	caRepo      *storage.CARepo
 	pkiCertRepo *storage.PKICertRepo
+	// ipcBroadcast 在卡片增删改后广播 slot_changed 事件；可为 nil。
+	ipcBroadcast func(reason string)
 }
 
 // NewServer 创建 API 服务实例。
@@ -100,8 +102,10 @@ func (s *Server) registerRoutes() {
 	// ---- 认证接口（公开，不需要 API Token）----
 	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/auth/register", s.handleRegister)
+	s.mux.HandleFunc("POST /api/auth/cloud-login", s.handleCloudLogin)
 	s.mux.HandleFunc("POST /api/auth/refresh", s.handleRefreshToken)
 	s.mux.HandleFunc("DELETE /api/auth/logout", s.handleLogout)
+	s.mux.HandleFunc("DELETE /api/auth/logout-all", s.handleLogoutAll)
 	s.mux.HandleFunc("PUT /api/auth/password", s.handleChangePassword)
 
 	// ---- 当前用户 ----
@@ -121,6 +125,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/cards/{uuid}", s.handleGetCard)
 	s.mux.HandleFunc("PUT /api/cards/{uuid}", s.handleUpdateCard)
 	s.mux.HandleFunc("DELETE /api/cards/{uuid}", s.handleDeleteCard)
+	s.mux.HandleFunc("POST /api/cards/{uuid}/reset-pin", s.handleResetPIN)
+	s.mux.HandleFunc("POST /api/cards/{uuid}/reset-puk", s.handleResetPUK)
 
 	// ---- 证书管理 ----
 	s.mux.HandleFunc("GET /api/cards/{card_uuid}/certs", s.handleListCerts)
@@ -186,6 +192,7 @@ func (s *Server) registerRoutes() {
 	// ---- 云端同步 ----
 	s.mux.HandleFunc("POST /api/cloud/sync", s.handleCloudSync)
 	s.mux.HandleFunc("GET /api/cloud/status", s.handleCloudStatus)
+	s.mux.HandleFunc("POST /api/cloud/deliver", s.handleCloudDeliver)
 
 	// ---- 前端管理界面（静态文件）----
 	// 所有非 /api/ 路径的请求都由前端 SPA 处理
@@ -411,4 +418,22 @@ func parsePagination(r *http.Request) (offset, limit int) {
 		limit = 20
 	}
 	return
+}
+
+// SetIPCBroadcaster 注入 IPC 事件广播回调。
+// 由 cmd/client-card/main.go 在启动时调用 apiServer.SetIPCBroadcaster(ipcServer.BroadcastSlotChanged)，
+// 之后任何新增/删除/同步卡片的 handler 都可以通过 s.notifySlotChanged() 广播变更事件。
+// 若未调用该方法，notifySlotChanged 将静默跳过，不产生任何副作用。
+func (s *Server) SetIPCBroadcaster(fn func(reason string)) {
+	s.ipcBroadcast = fn
+}
+
+// notifySlotChanged 在卡片列表发生变化时广播 slot_changed 事件给所有 pkcs11-mock 客户端。
+// reason 取值建议：create / delete / update / sync。
+// 异步执行，不阻塞当前请求。
+func (s *Server) notifySlotChanged(reason string) {
+	if s.ipcBroadcast == nil {
+		return
+	}
+	go s.ipcBroadcast(reason)
 }

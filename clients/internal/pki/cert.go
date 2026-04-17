@@ -494,6 +494,7 @@ type ImportCertResult struct {
 	Cert          *storage.PKICert `json:"cert"`
 	KeyMatched    bool             `json:"key_matched"`    // 是否自动匹配到私钥
 	KeyMatchedID  string           `json:"key_matched_id"` // 匹配到的私钥记录 UUID
+	MatchedSource string           `json:"matched_source"` // "database" / "card:<uuid>" / ""
 }
 
 // ImportCert 导入证书（支持四种模式）。
@@ -535,6 +536,7 @@ func importCertOnly(ctx context.Context, certRepo *storage.PKICertRepo, req *Imp
 			pkiCert.KeyStorage = orphan.KeyStorage
 			result.KeyMatched = true
 			result.KeyMatchedID = orphan.UUID
+			result.MatchedSource = "database"
 			// 删除孤立私钥记录
 			_ = certRepo.Delete(ctx, orphan.UUID)
 			break

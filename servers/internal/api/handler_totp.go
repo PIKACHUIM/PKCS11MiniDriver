@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/globaltrusts/server-card/internal/auth"
 )
 
 // ---- 云端 TOTP 处理器 ----
@@ -113,7 +114,7 @@ func (s *Server) handleGetTOTPCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 权限检查：只有所有者可以获取验证码
-	if userUUID != claims.UserUUID && claims.Role != "admin" {
+	if userUUID != claims.UserUUID && !auth.IsAdmin(claims.Role) {
 		writeError(w, http.StatusForbidden, "无权访问此 TOTP 条目")
 		return
 	}

@@ -34,7 +34,7 @@ func TestWorkflowCreateOrder(t *testing.T) {
 	db, cleanup := setupServerDB(t)
 	defer cleanup()
 
-	svc := workflow.NewService(db)
+svc := workflow.NewService(db, nil, nil)
 	ctx := context.Background()
 	userUUID := createTestUser(t, db, "order@test.com")
 
@@ -90,7 +90,7 @@ func TestWorkflowGetOrder(t *testing.T) {
 	db, cleanup := setupServerDB(t)
 	defer cleanup()
 
-	svc := workflow.NewService(db)
+svc := workflow.NewService(db, nil, nil)
 	ctx := context.Background()
 	userUUID := createTestUser(t, db, "getorder@test.com")
 
@@ -123,7 +123,7 @@ func TestWorkflowListOrders(t *testing.T) {
 	db, cleanup := setupServerDB(t)
 	defer cleanup()
 
-	svc := workflow.NewService(db)
+svc := workflow.NewService(db, nil, nil)
 	ctx := context.Background()
 	userUUID := createTestUser(t, db, "listorder@test.com")
 
@@ -156,7 +156,7 @@ func TestWorkflowApplicationApprove(t *testing.T) {
 	db, cleanup := setupServerDB(t)
 	defer cleanup()
 
-	svc := workflow.NewService(db)
+svc := workflow.NewService(db, nil, nil)
 	ctx := context.Background()
 	userUUID := createTestUser(t, db, "approve@test.com")
 	adminUUID := createTestUser(t, db, "admin@test.com")
@@ -212,7 +212,7 @@ func TestWorkflowApplicationReject(t *testing.T) {
 	db, cleanup := setupServerDB(t)
 	defer cleanup()
 
-	svc := workflow.NewService(db)
+svc := workflow.NewService(db, nil, nil)
 	ctx := context.Background()
 	userUUID := createTestUser(t, db, "reject@test.com")
 	adminUUID := createTestUser(t, db, "admin2@test.com")
@@ -261,7 +261,7 @@ func TestWorkflowApplicationListFilter(t *testing.T) {
 	db, cleanup := setupServerDB(t)
 	defer cleanup()
 
-	svc := workflow.NewService(db)
+svc := workflow.NewService(db, nil, nil)
 	ctx := context.Background()
 	userUUID := createTestUser(t, db, "filter@test.com")
 	adminUUID := createTestUser(t, db, "admin3@test.com")

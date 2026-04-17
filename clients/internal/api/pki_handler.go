@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -282,6 +283,8 @@ func (s *Server) handleIssuePKICert(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleImportPKICert POST /api/pki/certs/import
+// 在 pki.ImportCert 完成数据库内匹配后，对 cert_only 模式额外扫描所有智能卡中的私钥，
+// 若命中则返回 matched_source="card:<uuid>"（但不自动迁移卡上私钥，仅做关联提示）。
 func (s *Server) handleImportPKICert(w http.ResponseWriter, r *http.Request) {
 	var req pki.ImportCertRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -293,7 +296,50 @@ func (s *Server) handleImportPKICert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "导入证书失败: "+err.Error())
 		return
 	}
+
+	// cert_only 且数据库内未匹配时，尝试在智能卡 certificates.cert_content 公钥中匹配
+	if req.Mode == pki.ImportModeCertOnly && !result.KeyMatched && req.CertPEM != "" {
+		if src, ok := s.findMatchingCardCert(r.Context(), req.CertPEM); ok {
+			result.MatchedSource = src
+			// 不迁移私钥，仅做提示。前端据此可引导用户"将该证书绑定到该卡片"
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, Response{Code: 0, Message: "ok", Data: result})
+}
+
+// findMatchingCardCert 在所有本地/TPM2 卡片的 certificates 表中按公钥查找匹配项。
+// 返回形如 "card:<card_uuid>/cert:<cert_uuid>" 的来源标识。
+func (s *Server) findMatchingCardCert(ctx context.Context, certPEM string) (string, bool) {
+	pubDER, err := parseCertPublicKeyPEM(certPEM)
+	if err != nil || len(pubDER) == 0 {
+		return "", false
+	}
+
+	cards, err := s.cardRepo.ListAll(ctx)
+	if err != nil {
+		return "", false
+	}
+	for _, c := range cards {
+		if c.SlotType != storage.SlotTypeLocal && c.SlotType != storage.SlotTypeTPM2 {
+			continue
+		}
+		certs, err := s.certRepo.ListByCard(ctx, c.UUID)
+		if err != nil {
+			continue
+		}
+		for _, cc := range certs {
+			if len(cc.CertContent) == 0 {
+				continue
+			}
+			// certificates.cert_content 可能是 DER 证书或 PKIX 公钥 DER；
+			// 这里先尝试把它当作证书解析，再退回当作公钥 DER 直接比较。
+			if matchPubKeyAgainstCardCert(pubDER, cc.CertContent) {
+				return fmt.Sprintf("card:%s/cert:%s", c.UUID, cc.UUID), true
+			}
+		}
+	}
+	return "", false
 }
 
 // handleGetPKICert GET /api/pki/certs/{uuid}

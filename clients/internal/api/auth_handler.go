@@ -1,9 +1,16 @@
 package api
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -334,4 +341,189 @@ func extractBearerToken(r *http.Request) string {
 		return auth[7:]
 	}
 	return ""
+}
+
+// ---- 多账号：云端登录与全量登出 ----
+
+// cloudLoginDoer 抽象出"POST 云端 /api/auth/login"的行为，方便单元测试注入 mock。
+// 默认实现基于 net/http，单测可通过 SetCloudLoginDoer 注入自定义实现。
+type cloudLoginDoer func(ctx context.Context, cloudURL, username, password string) (*cloudLoginResp, error)
+
+// cloudLoginResp 是云端 /api/auth/login 响应体。
+// 兼容 {token,user_uuid,username,role} 和被 {code,message,data} 包裹两种格式。
+type cloudLoginResp struct {
+	Token    string `json:"token"`
+	UserUUID string `json:"user_uuid"`
+	Username string `json:"username"`
+	Role     string `json:"role"`
+}
+
+// defaultCloudLoginDoer 通过 HTTP 真实请求云端。
+func defaultCloudLoginDoer(ctx context.Context, cloudURL, username, password string) (*cloudLoginResp, error) {
+	if cloudURL == "" {
+		return nil, fmt.Errorf("cloud_url 不能为空")
+	}
+	body, err := json.Marshal(map[string]string{"username": username, "password": password})
+	if err != nil {
+		return nil, err
+	}
+	url := strings.TrimRight(cloudURL, "/") + "/api/auth/login"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("连接云端失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取云端响应失败: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("云端拒绝登录 [%d]: %s", resp.StatusCode, string(data))
+	}
+
+	// 优先尝试 {code,message,data} 包裹
+	var wrapper struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    *cloudLoginResp `json:"data"`
+	}
+	if err := json.Unmarshal(data, &wrapper); err == nil && wrapper.Data != nil && wrapper.Data.Token != "" {
+		if wrapper.Code != 0 {
+			return nil, fmt.Errorf("云端响应错误: %s", wrapper.Message)
+		}
+		return wrapper.Data, nil
+	}
+	// 否则按扁平结构解析
+	var flat cloudLoginResp
+	if err := json.Unmarshal(data, &flat); err != nil {
+		return nil, fmt.Errorf("解析云端响应失败: %w", err)
+	}
+	if flat.Token == "" {
+		return nil, fmt.Errorf("云端未返回 token")
+	}
+	return &flat, nil
+}
+
+// cloudLoginDoerHolder 使用原子变量持有当前 doer，便于单测替换后恢复。
+var cloudLoginDoerHolder cloudLoginDoer = defaultCloudLoginDoer
+
+// SetCloudLoginDoer 允许单元测试注入自定义云端登录实现，返回旧实现用于还原。
+func SetCloudLoginDoer(d cloudLoginDoer) cloudLoginDoer {
+	old := cloudLoginDoerHolder
+	if d != nil {
+		cloudLoginDoerHolder = d
+	}
+	return old
+}
+
+// handleCloudLogin POST /api/auth/cloud-login
+// 接收 {cloud_url, username, password}，调用云端登录后，
+// 把账号以 UserType=cloud 形式落到本地 users 表（以 cloud_url|username 去重），
+// 并生成一个本地 session token 返回，供多账号 Store 使用。
+func (s *Server) handleCloudLogin(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CloudURL string `json:"cloud_url"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
+		return
+	}
+	req.CloudURL = strings.TrimSpace(req.CloudURL)
+	req.Username = strings.TrimSpace(req.Username)
+	if req.CloudURL == "" || req.Username == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "cloud_url、username、password 不能为空")
+		return
+	}
+
+	// 调用云端登录
+	cloud, err := cloudLoginDoerHolder(r.Context(), req.CloudURL, req.Username, req.Password)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "云端登录失败: "+err.Error())
+		return
+	}
+
+	// 以 "cloud:<host>:<username>" 作为本地用户名，确保唯一且可辨识
+	localUsername := buildCloudLocalUsername(req.CloudURL, req.Username)
+
+	existing, err := s.userRepo.GetByUsername(r.Context(), localUsername)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "查询用户失败: "+err.Error())
+		return
+	}
+
+	var user *storage.User
+	if existing == nil {
+		user = &storage.User{
+			UserType:    storage.UserTypeCloud,
+			Role:        "user",
+			Username:    localUsername,
+			DisplayName: req.Username + "@" + hostOf(req.CloudURL),
+			Email:       "",
+			Enabled:     true,
+			CloudURL:    req.CloudURL,
+			AuthToken:   []byte(cloud.Token),
+		}
+		if err := s.userRepo.Create(r.Context(), user); err != nil {
+			writeError(w, http.StatusInternalServerError, "创建云端账号记录失败: "+err.Error())
+			return
+		}
+	} else {
+		existing.UserType = storage.UserTypeCloud
+		existing.CloudURL = req.CloudURL
+		existing.AuthToken = []byte(cloud.Token)
+		existing.Enabled = true
+		if err := s.userRepo.Update(r.Context(), existing); err != nil {
+			writeError(w, http.StatusInternalServerError, "更新云端账号记录失败: "+err.Error())
+			return
+		}
+		user = existing
+	}
+
+	// 生成本地 session token（24h 有效）
+	localToken := newSessionToken(user)
+
+	writeOK(w, map[string]interface{}{
+		"token":      localToken,
+		"user_uuid":  user.UUID,
+		"username":   user.Username,
+		"role":       user.Role,
+		"user_type":  string(user.UserType),
+		"cloud_url":  req.CloudURL,
+		"cloud_user": req.Username,
+		"expires_at": time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+	})
+}
+
+// handleLogoutAll DELETE /api/auth/logout-all
+// 清空所有 session（仅用于调试/多账号一键全部退出；不影响用户记录本身）。
+func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
+	sessionMu.Lock()
+	count := len(sessions)
+	sessions = make(map[string]*session)
+	sessionMu.Unlock()
+	writeOK(w, map[string]int{"cleared": count})
+}
+
+// buildCloudLocalUsername 构造本地用户名形如 "cloud:<host>:<username>"。
+func buildCloudLocalUsername(cloudURL, username string) string {
+	return "cloud:" + hostOf(cloudURL) + ":" + username
+}
+
+// hostOf 尝试从 URL 提取 host:port，失败则原样返回。
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	return u.Host
 }

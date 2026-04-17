@@ -185,6 +185,9 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 		UserUUID     string `json:"user_uuid"`
 		UserPassword string `json:"user_password"` // 用于加密主密钥
 		CardPassword string `json:"card_password"` // 可选
+		PIN          string `json:"pin"`           // 可选，未提供时自动生成
+		PUK          string `json:"puk"`           // 可选，未提供时自动生成
+		AdminKey     string `json:"admin_key"`     // 可选，未提供时自动生成
 		ExpiresAt    string `json:"expires_at"`    // RFC3339 格式
 		Remark       string `json:"remark"`
 	}
@@ -211,11 +214,24 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	card, err := createLocalCard(r.Context(), s.cardRepo, req.UserUUID, req.CardName, req.UserPassword, req.CardPassword, req.Remark)
+	// 调用三级凭据版本；未提供 PUK/AdminKey 时自动生成并在响应中一次性返回
+	result, err := local.CreateCardWithCreds(r.Context(), s.cardRepo, local.CreateCardArgs{
+		UserUUID:      req.UserUUID,
+		CardName:      req.CardName,
+		UserPassword:  req.UserPassword,
+		CardPassword:  req.CardPassword,
+		PIN:           req.PIN,
+		PUK:           req.PUK,
+		AdminKey:      req.AdminKey,
+		GeneratePUK:   req.PUK == "",
+		GenerateAdmin: req.AdminKey == "",
+		Remark:        req.Remark,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "创建卡片失败: "+err.Error())
 		return
 	}
+	card := result.Card
 
 	// 设置过期时间
 	if req.ExpiresAt != "" {
@@ -225,6 +241,18 @@ func (s *Server) handleCreateCard(w http.ResponseWriter, r *http.Request) {
 			s.cardRepo.Update(r.Context(), card)
 		}
 	}
+
+	// Slot 变更广播
+	s.notifySlotChanged("create")
+
+	// 响应体包含卡片及一次性明文 PUK / AdminKey（调用方必须保存）
+	writeJSON(w, http.StatusCreated, Response{Code: 0, Message: "ok", Data: map[string]interface{}{
+		"card":      card,
+		"puk":       result.PUK,       // 仅自动生成时非空
+		"admin_key": result.AdminKey,  // 仅自动生成时非空
+		"pin":       result.PIN,       // 仅自动生成时非空
+	}})
+}
 
 	writeJSON(w, http.StatusCreated, Response{Code: 0, Message: "ok", Data: card})
 }
@@ -294,5 +322,81 @@ func (s *Server) handleDeleteCard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "删除卡片失败: "+err.Error())
 		return
 	}
+	// Slot 变更广播
+	s.notifySlotChanged("delete")
 	writeOK(w, nil)
+}
+
+// ---- PIN / PUK / AdminKey 三级凭据：重置接口 ----
+
+// handleResetPIN POST /api/cards/{uuid}/reset-pin
+// 使用 PUK 或 AdminKey 重置 PIN。请求体：{puk?, admin_key?, new_pin}
+func (s *Server) handleResetPIN(w http.ResponseWriter, r *http.Request) {
+	cardUUID := r.PathValue("uuid")
+	card, err := s.cardRepo.GetByUUID(r.Context(), cardUUID)
+	if err != nil || card == nil {
+		writeError(w, http.StatusNotFound, "卡片不存在")
+		return
+	}
+
+	var req struct {
+		PUK      string `json:"puk"`
+		AdminKey string `json:"admin_key"`
+		NewPIN   string `json:"new_pin"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
+		return
+	}
+	if req.NewPIN == "" {
+		writeError(w, http.StatusBadRequest, "new_pin 不能为空")
+		return
+	}
+	if req.PUK == "" && req.AdminKey == "" {
+		writeError(w, http.StatusBadRequest, "需要提供 puk 或 admin_key")
+		return
+	}
+
+	keyType := "puk"
+	secret := req.PUK
+	if req.AdminKey != "" {
+		keyType = "admin"
+		secret = req.AdminKey
+	}
+
+	if err := local.ResetPIN(r.Context(), s.cardRepo, card, keyType, secret, req.NewPIN); err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"status": "pin_reset_ok"})
+}
+
+// handleResetPUK POST /api/cards/{uuid}/reset-puk
+// 仅 AdminKey 可重置 PUK。请求体：{admin_key, new_puk}
+func (s *Server) handleResetPUK(w http.ResponseWriter, r *http.Request) {
+	cardUUID := r.PathValue("uuid")
+	card, err := s.cardRepo.GetByUUID(r.Context(), cardUUID)
+	if err != nil || card == nil {
+		writeError(w, http.StatusNotFound, "卡片不存在")
+		return
+	}
+
+	var req struct {
+		AdminKey string `json:"admin_key"`
+		NewPUK   string `json:"new_puk"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
+		return
+	}
+	if req.AdminKey == "" || req.NewPUK == "" {
+		writeError(w, http.StatusBadRequest, "admin_key 与 new_puk 不能为空")
+		return
+	}
+
+	if err := local.ResetPUK(r.Context(), s.cardRepo, card, req.AdminKey, req.NewPUK); err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"status": "puk_reset_ok"})
 }

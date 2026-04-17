@@ -45,6 +45,47 @@ func NewKeyManager(certRepo *storage.CertRepo, cardRepo *storage.CardRepo) *KeyM
 // userPassword 是用户密码（明文），用于加密主密钥。
 // cardPassword 可选，是卡片独立密码（留空则不设置）。
 func CreateCard(ctx context.Context, cardRepo *storage.CardRepo, userUUID, cardName, userPassword, cardPassword, remark string) (*storage.Card, error) {
+	out, err := CreateCardWithCreds(ctx, cardRepo, CreateCardArgs{
+		UserUUID:     userUUID,
+		CardName:     cardName,
+		UserPassword: userPassword,
+		CardPassword: cardPassword,
+		Remark:       remark,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.Card, nil
+}
+
+// CreateCardArgs 是带 PIN/PUK/AdminKey 的卡片创建参数。
+type CreateCardArgs struct {
+	UserUUID     string
+	CardName     string
+	UserPassword string // 可选，与 CardPassword 至少一个
+	CardPassword string // 可选
+	PIN          string // 可选；为空且 GeneratePIN=true 时自动生成
+	PUK          string // 可选；为空且 GeneratePUK=true 时自动生成（默认 true）
+	AdminKey     string // 可选；为空且 GenerateAdmin=true 时自动生成（默认 true）
+	GeneratePIN  bool
+	GeneratePUK  bool
+	GenerateAdmin bool
+	Remark       string
+}
+
+// CreateCardResult 是创建结果，包含卡片及一次性返回的明文 PUK/AdminKey。
+// 调用方必须把 PUK 与 AdminKey 提示给用户保存；后端只存加密副本。
+type CreateCardResult struct {
+	Card     *storage.Card
+	PIN      string // 仅当自动生成时返回
+	PUK      string // 仅当自动生成时返回
+	AdminKey string // 仅当自动生成时返回
+}
+
+// CreateCardWithCreds 创建卡片并可选自动生成 PIN/PUK/AdminKey 三级凭据。
+// 默认行为：PUK 与 AdminKey 若未提供则自动生成 16 字节随机值（hex 编码 32 字符）。
+// 所有凭据都作为独立 CardKeyEntry 各自加密一份"主密钥副本"存储，互不推导。
+func CreateCardWithCreds(ctx context.Context, cardRepo *storage.CardRepo, args CreateCardArgs) (*CreateCardResult, error) {
 	// 1. 生成 32 字节随机主密钥
 	masterKey, err := cryptoutil.GenerateKey()
 	if err != nil {
@@ -55,32 +96,246 @@ func CreateCard(ctx context.Context, cardRepo *storage.CardRepo, userUUID, cardN
 	card := &storage.Card{
 		UUID:     uuid.New().String(),
 		SlotType: storage.SlotTypeLocal,
-		CardName: cardName,
-		UserUUID: userUUID,
-		Remark:   remark,
+		CardName: args.CardName,
+		UserUUID: args.UserUUID,
+		Remark:   args.Remark,
 	}
 
-	// 2. 用用户密码加密主密钥
-	userEntry, err := encryptMasterKey(masterKey, []byte(userPassword), "user", userUUID)
-	if err != nil {
-		return nil, fmt.Errorf("加密主密钥（用户密码）失败: %w", err)
-	}
-	card.CardKeys = append(card.CardKeys, *userEntry)
+	out := &CreateCardResult{}
 
-	// 3. 如果设置了卡片密码，额外加密一份
-	if cardPassword != "" {
-		cardEntry, err := encryptMasterKey(masterKey, []byte(cardPassword), "card", "")
+	// 2. 用户密码（可选）
+	if args.UserPassword != "" {
+		userEntry, err := encryptMasterKey(masterKey, []byte(args.UserPassword), "user", args.UserUUID)
+		if err != nil {
+			return nil, fmt.Errorf("加密主密钥（用户密码）失败: %w", err)
+		}
+		card.CardKeys = append(card.CardKeys, *userEntry)
+	}
+
+	// 3. 卡片密码（可选，兼容旧字段）
+	if args.CardPassword != "" {
+		cardEntry, err := encryptMasterKey(masterKey, []byte(args.CardPassword), "card", "")
 		if err != nil {
 			return nil, fmt.Errorf("加密主密钥（卡片密码）失败: %w", err)
 		}
 		card.CardKeys = append(card.CardKeys, *cardEntry)
 	}
 
+	// 4. PIN（与 card 同义，保留独立类型便于区分 UI）
+	pin := args.PIN
+	if pin == "" && args.GeneratePIN {
+		pin = randomCred(6) // 6 位数字感观
+	}
+	if pin != "" {
+		pinEntry, err := encryptMasterKey(masterKey, []byte(pin), "pin", "")
+		if err != nil {
+			return nil, fmt.Errorf("加密主密钥（PIN）失败: %w", err)
+		}
+		card.CardKeys = append(card.CardKeys, *pinEntry)
+		if args.GeneratePIN {
+			out.PIN = pin
+		}
+	}
+
+	// 5. PUK
+	puk := args.PUK
+	generatePUK := args.GeneratePUK || (args.PUK == "")
+	if puk == "" && generatePUK {
+		puk = randomCred(16)
+	}
+	if puk != "" {
+		pukEntry, err := encryptMasterKey(masterKey, []byte(puk), "puk", "")
+		if err != nil {
+			return nil, fmt.Errorf("加密主密钥（PUK）失败: %w", err)
+		}
+		card.CardKeys = append(card.CardKeys, *pukEntry)
+		if generatePUK {
+			out.PUK = puk
+		}
+	}
+
+	// 6. Admin Key
+	admin := args.AdminKey
+	generateAdmin := args.GenerateAdmin || (args.AdminKey == "")
+	if admin == "" && generateAdmin {
+		admin = randomCred(16)
+	}
+	if admin != "" {
+		adminEntry, err := encryptMasterKey(masterKey, []byte(admin), "admin", "")
+		if err != nil {
+			return nil, fmt.Errorf("加密主密钥（AdminKey）失败: %w", err)
+		}
+		card.CardKeys = append(card.CardKeys, *adminEntry)
+		if generateAdmin {
+			out.AdminKey = admin
+		}
+	}
+
 	if err := cardRepo.Create(ctx, card); err != nil {
 		return nil, fmt.Errorf("保存卡片失败: %w", err)
 	}
 
-	return card, nil
+	out.Card = card
+	return out, nil
+}
+
+// ResetPIN 用 PUK 或 AdminKey 解锁主密钥，然后用 newPIN 重新加密 pin 条目。
+// 同时清零 puk/pin 的 Attempts/Locked。
+// keyType: "puk" 或 "admin"
+func ResetPIN(ctx context.Context, cardRepo *storage.CardRepo, card *storage.Card, keyType, secret, newPIN string) error {
+	if keyType != "puk" && keyType != "admin" {
+		return fmt.Errorf("keyType 必须为 puk 或 admin")
+	}
+	if newPIN == "" {
+		return fmt.Errorf("新 PIN 不能为空")
+	}
+
+	masterKey, err := tryUnlockByType(card, keyType, secret)
+	if err != nil {
+		// 失败：递增对应条目的 Attempts，超过阈值则锁定
+		if ferr := bumpFailure(ctx, cardRepo, card, keyType); ferr != nil {
+			return fmt.Errorf("%w (记录失败次数时出错: %v)", err, ferr)
+		}
+		return err
+	}
+	defer zeroBytes(masterKey)
+
+	// 清零 puk/pin 失败状态
+	for i := range card.CardKeys {
+		kt := card.CardKeys[i].KeyType
+		if kt == "pin" || kt == "puk" || kt == "card" || kt == "user" {
+			card.CardKeys[i].Attempts = 0
+			card.CardKeys[i].Locked = false
+		}
+	}
+
+	// 用新 PIN 重新加密一条 pin 条目（若不存在则新增，若存在则覆盖第一条）
+	newEntry, err := encryptMasterKey(masterKey, []byte(newPIN), "pin", "")
+	if err != nil {
+		return fmt.Errorf("加密新 PIN 失败: %w", err)
+	}
+	replaced := false
+	for i := range card.CardKeys {
+		if card.CardKeys[i].KeyType == "pin" {
+			card.CardKeys[i] = *newEntry
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		card.CardKeys = append(card.CardKeys, *newEntry)
+	}
+
+	// 同步清零卡片级 PIN 失败标记
+	card.PINFailedCount = 0
+	card.PINLocked = false
+
+	return cardRepo.Update(ctx, card)
+}
+
+// ResetPUK 用 AdminKey 解锁主密钥，然后用 newPUK 重新加密 puk 条目。
+func ResetPUK(ctx context.Context, cardRepo *storage.CardRepo, card *storage.Card, adminKey, newPUK string) error {
+	if newPUK == "" {
+		return fmt.Errorf("新 PUK 不能为空")
+	}
+	masterKey, err := tryUnlockByType(card, "admin", adminKey)
+	if err != nil {
+		if ferr := bumpFailure(ctx, cardRepo, card, "admin"); ferr != nil {
+			return fmt.Errorf("%w (记录失败次数时出错: %v)", err, ferr)
+		}
+		return err
+	}
+	defer zeroBytes(masterKey)
+
+	newEntry, err := encryptMasterKey(masterKey, []byte(newPUK), "puk", "")
+	if err != nil {
+		return fmt.Errorf("加密新 PUK 失败: %w", err)
+	}
+	replaced := false
+	for i := range card.CardKeys {
+		if card.CardKeys[i].KeyType == "puk" {
+			card.CardKeys[i] = *newEntry
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		card.CardKeys = append(card.CardKeys, *newEntry)
+	}
+	return cardRepo.Update(ctx, card)
+}
+
+// tryUnlockByType 只用指定类型的条目尝试解密主密钥。
+// 遍历相同 keyType 的所有 entry；若没有该类型条目或全部失败则返回错误。
+// Locked=true 的条目会被跳过，若全部被锁则报 CKR_PIN_LOCKED 等价错误。
+func tryUnlockByType(card *storage.Card, keyType, secret string) ([]byte, error) {
+	hasType := false
+	allLocked := true
+	for _, e := range card.CardKeys {
+		if e.KeyType != keyType {
+			continue
+		}
+		hasType = true
+		if e.Locked {
+			continue
+		}
+		allLocked = false
+		aesKey := cryptoutil.HMACSHA256([]byte(secret), e.Salt)
+		masterKey, err := cryptoutil.DecryptAES256GCM(aesKey, e.EncMasterKey)
+		if err == nil {
+			return masterKey, nil
+		}
+	}
+	if !hasType {
+		return nil, fmt.Errorf("卡片未设置 %s 凭据", keyType)
+	}
+	if allLocked {
+		return nil, fmt.Errorf("%s 已被锁定", keyType)
+	}
+	return nil, fmt.Errorf("%s 验证失败", keyType)
+}
+
+// bumpFailure 为指定 keyType 的所有条目递增失败次数；
+// PUK 达到 10 次锁定；Admin 达到 10 次锁定。
+func bumpFailure(ctx context.Context, cardRepo *storage.CardRepo, card *storage.Card, keyType string) error {
+	maxAttempts := 10
+	if keyType == "pin" {
+		maxAttempts = card.PINRetries
+		if maxAttempts <= 0 {
+			maxAttempts = 3
+		}
+	}
+	changed := false
+	for i := range card.CardKeys {
+		if card.CardKeys[i].KeyType != keyType {
+			continue
+		}
+		card.CardKeys[i].Attempts++
+		if card.CardKeys[i].Attempts >= maxAttempts {
+			card.CardKeys[i].Locked = true
+		}
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return cardRepo.Update(ctx, card)
+}
+
+// randomCred 生成 n 字节随机 hex 凭据（返回 2n 字符字符串）。
+func randomCred(nBytes int) string {
+	b := make([]byte, nBytes)
+	if _, err := rand.Read(b); err != nil {
+		// 兜底：时间戳（不应该发生）
+		return fmt.Sprintf("fallback-%d", nBytes)
+	}
+	out := make([]byte, 2*nBytes)
+	const hexCh = "0123456789abcdef"
+	for i, v := range b {
+		out[i*2] = hexCh[v>>4]
+		out[i*2+1] = hexCh[v&0x0f]
+	}
+	return string(out)
 }
 
 // GenerateKeyPair 在指定卡片中生成密钥对并存储。

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/globaltrusts/server-card/internal/auth"
 	"github.com/globaltrusts/server-card/internal/card"
 	"github.com/globaltrusts/server-card/internal/storage"
 )
@@ -112,6 +113,11 @@ func (s *Server) handleImportCert(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromCtx(r.Context())
 	cardUUID := r.PathValue("uuid")
 
+	// PIN 会话校验
+	if !s.checkPINSession(w, r, cardUUID) {
+		return
+	}
+
 	var req ImportCertRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式错误")
@@ -131,6 +137,11 @@ func (s *Server) handleDeleteCert(w http.ResponseWriter, r *http.Request) {
 	cardUUID := r.PathValue("uuid")
 	certUUID := r.PathValue("cert_uuid")
 
+	// PIN 会话校验
+	if !s.checkPINSession(w, r, cardUUID) {
+		return
+	}
+
 	if err := s.cardSvc.DeleteCert(r.Context(), certUUID, cardUUID, claims.UserUUID); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
@@ -147,6 +158,11 @@ type KeyGenRequest struct {
 func (s *Server) handleKeyGen(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromCtx(r.Context())
 	cardUUID := r.PathValue("uuid")
+
+	// PIN 会话校验
+	if !s.checkPINSession(w, r, cardUUID) {
+		return
+	}
 
 	var req KeyGenRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -175,6 +191,11 @@ type SignRequest struct {
 func (s *Server) handleSign(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromCtx(r.Context())
 	cardUUID := r.PathValue("uuid")
+
+	// PIN 会话校验（签名为高敏感操作，必须持有有效 PIN 会话）
+	if !s.checkPINSession(w, r, cardUUID) {
+		return
+	}
 
 	var req SignRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -212,6 +233,11 @@ func (s *Server) handleDecrypt(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromCtx(r.Context())
 	cardUUID := r.PathValue("uuid")
 
+	// PIN 会话校验（解密为高敏感操作，必须持有有效 PIN 会话）
+	if !s.checkPINSession(w, r, cardUUID) {
+		return
+	}
+
 	var req DecryptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式错误")
@@ -248,7 +274,7 @@ func (s *Server) handleListCertsFiltered(w http.ResponseWriter, r *http.Request)
 
 	// 非管理员只能查看自己的证书
 	claims := claimsFromCtx(r.Context())
-	if claims.Role != "admin" {
+	if !auth.IsAdmin(claims.Role) {
 		userUUID = claims.UserUUID
 	}
 
@@ -400,7 +426,7 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request) {
 	// 权限检查：只有证书所有者或管理员可以续期
 	cardRepo := storage.NewCardRepo(s.db)
 	card, err := cardRepo.GetByUUID(r.Context(), cert.CardUUID)
-	if err != nil || (card.UserUUID != claims.UserUUID && claims.Role != "admin") {
+	if err != nil || (card.UserUUID != claims.UserUUID && !auth.IsAdmin(claims.Role)) {
 		writeError(w, http.StatusForbidden, "无权续期此证书")
 		return
 	}
@@ -450,7 +476,7 @@ func (s *Server) handleExportCert(w http.ResponseWriter, r *http.Request) {
 	// 权限检查：只有证书所有者或管理员可以导出
 	cardRepo := storage.NewCardRepo(s.db)
 	card, err := cardRepo.GetByUUID(r.Context(), cert.CardUUID)
-	if err != nil || (card.UserUUID != claims.UserUUID && claims.Role != "admin") {
+	if err != nil || (card.UserUUID != claims.UserUUID && !auth.IsAdmin(claims.Role)) {
 		writeError(w, http.StatusForbidden, "无权导出此证书")
 		return
 	}
@@ -504,6 +530,8 @@ func (s *Server) handleExportCert(w http.ResponseWriter, r *http.Request) {
 // ---- PIN/PUK/Admin Key 处理器 ----
 
 // handleVerifyPIN 验证卡片 PIN 码。
+// 验证成功后签发 PIN 会话令牌（X-PIN-Session），有效期 15 分钟。
+// 后续签名/解密/密钥生成/证书增删等敏感操作需携带此令牌。
 func (s *Server) handleVerifyPIN(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromCtx(r.Context())
 	cardUUID := r.PathValue("uuid")
@@ -527,10 +555,23 @@ func (s *Server) handleVerifyPIN(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+
+	resp := map[string]interface{}{
 		"success":   ok,
 		"remaining": remaining,
-	})
+	}
+	// PIN 验证成功时签发会话令牌
+	if ok {
+		session, sErr := s.pinSessions.Create(cardUUID, claims.UserUUID)
+		if sErr != nil {
+			writeError(w, http.StatusInternalServerError, sErr.Error())
+			return
+		}
+		resp["pin_session_token"] = session.Token
+		resp["expires_at"] = session.ExpiresAt
+		resp["ttl_seconds"] = int(s.pinSessions.TTL().Seconds())
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleUnlockWithPUK 使用 PUK 解锁并重置 PIN。
@@ -556,6 +597,8 @@ func (s *Server) handleUnlockWithPUK(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
+	// PIN 被重置，撤销该卡片的所有旧 PIN 会话
+	s.pinSessions.RevokeByCard(cardUUID)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "PIN 已重置"})
 }
 
@@ -583,5 +626,17 @@ func (s *Server) handleResetWithAdminKey(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
+	// PIN/PUK 被重置，撤销该卡片的所有旧 PIN 会话
+	s.pinSessions.RevokeByCard(cardUUID)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "PIN 和 PUK 已重置"})
+}
+
+// handleLogoutPINSession 主动撤销当前 PIN 会话令牌（从 X-PIN-Session Header 读取）。
+// 用户主动登出或切换卡片时调用，立即失效令牌以降低令牌泄露风险。
+func (s *Server) handleLogoutPINSession(w http.ResponseWriter, r *http.Request) {
+	token := r.Header.Get("X-PIN-Session")
+	if token != "" {
+		s.pinSessions.Revoke(token)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "PIN 会话已注销"})
 }

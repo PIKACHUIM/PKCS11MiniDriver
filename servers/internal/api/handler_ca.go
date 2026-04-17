@@ -4,11 +4,15 @@ import (
 	"context"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 
+	"github.com/globaltrusts/server-card/internal/auth"
 	"github.com/globaltrusts/server-card/internal/ca"
 	"github.com/globaltrusts/server-card/internal/storage"
 )
@@ -107,6 +111,105 @@ func (s *Server) handleDeleteCA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "CA 已删除"})
+}
+
+// ImportCARequest 是导入外部 CA 请求体。
+type ImportCARequest struct {
+	Name          string `json:"name"`            // CA 显示名称
+	CertPEM       string `json:"cert_pem"`        // CA 证书 PEM（可含证书链）
+	PrivateKeyPEM string `json:"private_key_pem"` // CA 私钥 PEM
+	ParentUUID    string `json:"parent_uuid"`     // 可选：父 CA UUID
+}
+
+// handleImportCA 导入外部 CA（POST /api/cas/import）。
+// 需要管理员权限，已通过路由层控制。
+func (s *Server) handleImportCA(w http.ResponseWriter, r *http.Request) {
+	var req ImportCARequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	newCA, err := s.caSvc.ImportCA(r.Context(), &ca.ImportCAParams{
+		Name:          req.Name,
+		CertPEM:       req.CertPEM,
+		PrivateKeyPEM: req.PrivateKeyPEM,
+		ParentUUID:    req.ParentUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	claims := claimsFromCtx(r.Context())
+	s.auditLogRepo.Create(r.Context(), &storage.AuditLog{ //nolint:errcheck
+		UserUUID:     claims.UserUUID,
+		Action:       "import_ca",
+		ResourceType: "ca",
+		ResourceUUID: newCA.UUID,
+		Detail:       fmt.Sprintf(`{"name":"%s"}`, req.Name),
+		IPAddress:    r.RemoteAddr,
+	})
+
+	// 响应不返回私钥
+	newCA.PrivateEnc = nil
+	writeJSON(w, http.StatusCreated, newCA)
+}
+
+// handleGetCAChain 返回指定 CA 及其所有父 CA 的 PEM 证书链。
+// 响应格式：application/x-pem-file 或 JSON（根据 Accept header）。
+func (s *Server) handleGetCAChain(w http.ResponseWriter, r *http.Request) {
+	caUUID := r.PathValue("uuid")
+	chain, err := s.caSvc.GetChain(r.Context(), caUUID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	// 按 Accept 协商返回 PEM 或 JSON
+	if accept := r.Header.Get("Accept"); accept == "application/x-pem-file" || accept == "text/plain" {
+		w.Header().Set("Content-Type", "application/x-pem-file")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, chain)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"chain_pem": chain})
+}
+
+// handleGetCertChain 返回指定证书 + 其签发 CA 的完整证书链。
+// 链顺序：叶子证书 → 签发 CA → 上级 CA → ... → 根 CA。
+func (s *Server) handleGetCertChain(w http.ResponseWriter, r *http.Request) {
+	certUUID := r.PathValue("uuid")
+	certRepo := storage.NewCertRepo(s.db)
+	cert, err := certRepo.GetByUUID(r.Context(), certUUID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "证书不存在")
+		return
+	}
+
+	// 非管理员只能查看自己的证书
+	claims := claimsFromCtx(r.Context())
+	if cert.UserUUID != claims.UserUUID && !auth.IsAdmin(claims.Role) {
+		writeError(w, http.StatusForbidden, "无权查看此证书")
+		return
+	}
+
+	chain := string(cert.CertContent)
+	if cert.CAUUID != "" {
+		if caChain, err := s.caSvc.GetChain(r.Context(), cert.CAUUID); err == nil {
+			if chain != "" && chain[len(chain)-1] != '\n' {
+				chain += "\n"
+			}
+			chain += caChain
+		}
+	}
+
+	if accept := r.Header.Get("Accept"); accept == "application/x-pem-file" || accept == "text/plain" {
+		w.Header().Set("Content-Type", "application/x-pem-file")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, chain)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"chain_pem": chain})
 }
 
 // ImportChainRequest 是导入证书链请求体。
@@ -229,9 +332,16 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	subject := pkixName(req.CommonName, req.Org, req.Country)
-	keyUsage := x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
-	if req.IsCA {
-		keyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
+
+	// 默认 KU/EKU：仅当未指定颁发模板时使用（指定模板时由签发引擎按 KeyUsageTemplate 回填）。
+	var defaultKeyUsage x509.KeyUsage
+	var defaultExtKeyUsage []x509.ExtKeyUsage
+	if req.IssuanceTmplUUID == "" {
+		defaultKeyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
+		if req.IsCA {
+			defaultKeyUsage = x509.KeyUsageCertSign | x509.KeyUsageCRLSign
+		}
+		defaultExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
 	}
 
 	issueReq := &ca.IssueRequest{
@@ -241,8 +351,8 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		ValidDays:        req.ValidDays,
 		IsCA:             req.IsCA,
 		PathLen:          req.PathLen,
-		KeyUsage:         keyUsage,
-		ExtKeyUsage:      []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		KeyUsage:         defaultKeyUsage,
+		ExtKeyUsage:      defaultExtKeyUsage,
 		DNSNames:         req.DNSNames,
 		IPAddresses:      ips,
 		EmailAddrs:       req.EmailAddrs,
@@ -345,23 +455,47 @@ func (s *Server) handlePublicCRL(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePublicOCSP 处理 OCSP 查询请求。
+// 支持 RFC 6960 三种调用方式：
+//   1. POST application/ocsp-request + DER body → binary 响应
+//   2. GET /ocsp/{caUUID}/{base64OcspReq} → binary 响应
+//   3. GET /ocsp/{caUUID}?serial=xxx&format=json → JSON 调试响应（旧方式，保留）
 func (s *Server) handlePublicOCSP(w http.ResponseWriter, r *http.Request) {
 	caUUID := r.PathValue("caUUID")
 	if s.revocationSvc == nil {
 		writeError(w, http.StatusServiceUnavailable, "吊销服务未启用")
 		return
 	}
-	serialNumber := r.URL.Query().Get("serial")
-	if serialNumber == "" {
-		writeError(w, http.StatusBadRequest, "缺少 serial 参数")
+
+	// 方式 3：JSON 调试（仅保留用于内部调试）
+	if r.Method == http.MethodGet && r.URL.Query().Get("format") == "json" {
+		serialNumber := r.URL.Query().Get("serial")
+		if serialNumber == "" {
+			writeError(w, http.StatusBadRequest, "缺少 serial 参数")
+			return
+		}
+		status, err := s.revocationSvc.QueryOCSPStatus(r.Context(), caUUID, serialNumber)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
 		return
 	}
-	status, err := s.revocationSvc.QueryOCSPStatus(r.Context(), caUUID, serialNumber)
+
+	// 方式 1/2：RFC 6960 标准 binary
+	reqDER, err := readOCSPRequestBytes(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respDER, err := s.revocationSvc.CreateOCSPResponseDER(r.Context(), caUUID, reqDER)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, status)
+	w.Header().Set("Content-Type", "application/ocsp-response")
+	w.WriteHeader(http.StatusOK)
+	w.Write(respDER) //nolint:errcheck
 }
 
 // handlePublicCAIssuer 返回 CA 证书 PEM（用于 AIA CAIssuer）。
@@ -419,7 +553,7 @@ func (s *Server) handlePublicCRLByPath(w http.ResponseWriter, r *http.Request) {
 	w.Write(crl) //nolint:errcheck
 }
 
-// handlePublicOCSPByPath 通过自定义路径处理 OCSP 请求。
+// handlePublicOCSPByPath 通过自定义路径处理 OCSP 请求（RFC 6960 binary）。
 func (s *Server) handlePublicOCSPByPath(w http.ResponseWriter, r *http.Request) {
 	path := r.PathValue("path")
 	if s.revocationSvc == nil {
@@ -431,17 +565,76 @@ func (s *Server) handlePublicOCSPByPath(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	serialNumber := r.URL.Query().Get("serial")
-	if serialNumber == "" {
-		writeError(w, http.StatusBadRequest, "缺少 serial 参数")
+
+	// 方式 3：JSON 调试
+	if r.Method == http.MethodGet && r.URL.Query().Get("format") == "json" {
+		serialNumber := r.URL.Query().Get("serial")
+		if serialNumber == "" {
+			writeError(w, http.StatusBadRequest, "缺少 serial 参数")
+			return
+		}
+		status, err := s.revocationSvc.QueryOCSPStatus(r.Context(), caUUID, serialNumber)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, status)
 		return
 	}
-	status, err := s.revocationSvc.QueryOCSPStatus(r.Context(), caUUID, serialNumber)
+
+	// 方式 1/2：RFC 6960 标准 binary
+	reqDER, err := readOCSPRequestBytes(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respDER, err := s.revocationSvc.CreateOCSPResponseDER(r.Context(), caUUID, reqDER)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, status)
+	w.Header().Set("Content-Type", "application/ocsp-response")
+	w.WriteHeader(http.StatusOK)
+	w.Write(respDER) //nolint:errcheck
+}
+
+// readOCSPRequestBytes 按 RFC 6960 从 HTTP 请求中提取 OCSP 请求 DER：
+//   - POST：Content-Type 应为 application/ocsp-request，body 即为 DER
+//   - GET：URL 路径末段或 ?req= 查询参数应为 base64(DER)
+func readOCSPRequestBytes(r *http.Request) ([]byte, error) {
+	if r.Method == http.MethodPost {
+		der, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB 上限
+		if err != nil {
+			return nil, fmt.Errorf("读取请求体失败: %w", err)
+		}
+		if len(der) == 0 {
+			return nil, fmt.Errorf("OCSP 请求体为空")
+		}
+		return der, nil
+	}
+
+	// GET：尝试从 ?req= 参数读取
+	b64 := r.URL.Query().Get("req")
+	if b64 == "" {
+		// 尝试 URL 路径末段（部分 OCSP 客户端用 /ocsp/<base64> 形式）
+		if p := r.URL.Path; p != "" {
+			idx := strings.LastIndex(p, "/")
+			if idx >= 0 && idx < len(p)-1 {
+				b64 = p[idx+1:]
+			}
+		}
+	}
+	if b64 == "" {
+		return nil, fmt.Errorf("GET 请求缺少 OCSP 请求数据（应通过 ?req= 或 URL 路径传递 base64 DER）")
+	}
+	// 某些客户端会 URL 编码 +/=，先尝试标准 base64 再尝试 URL-safe
+	der, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		if der, err = base64.URLEncoding.DecodeString(b64); err != nil {
+			return nil, fmt.Errorf("OCSP 请求 base64 解码失败: %w", err)
+		}
+	}
+	return der, nil
 }
 
 // handlePublicCAIssuerByPath 通过自定义路径返回 CA 证书。

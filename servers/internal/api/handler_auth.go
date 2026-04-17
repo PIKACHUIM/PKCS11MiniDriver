@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/globaltrusts/server-card/internal/auth"
 	"github.com/globaltrusts/server-card/internal/storage"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -458,8 +459,8 @@ func (s *Server) handleTOTPVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 验证 TOTP 码（从数据库获取加密的 TOTP 密钥并验证）
-	if !s.verifyUserTOTPCode(r.Context(), userUUID, req.Code) {
+	// 验证 TOTP 码（从 users.totp_secret 字段读取加密的登录 TOTP 密钥并验证）
+	if !s.verifyLoginTOTPCode(r.Context(), userUUID, req.Code) {
 		// 记录失败次数，连续 5 次失败锁定账号 15 分钟
 		s.userRepo.IncrementFailedAttempts(r.Context(), userUUID, 5, 15*time.Minute) //nolint:errcheck
 		writeError(w, http.StatusUnauthorized, "TOTP 验证码错误")
@@ -800,7 +801,7 @@ func (s *Server) handleListLogs(w http.ResponseWriter, r *http.Request) {
 
 	// 非管理员只能查看自己的日志
 	userUUID := r.URL.Query().Get("user_uuid")
-	if claims.Role != "admin" {
+	if !auth.IsAdmin(claims.Role) {
 		userUUID = claims.UserUUID
 	}
 

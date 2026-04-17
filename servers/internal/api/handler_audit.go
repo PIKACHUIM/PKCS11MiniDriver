@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/globaltrusts/server-card/internal/auth"
 	"github.com/globaltrusts/server-card/internal/storage"
 )
 
@@ -42,7 +43,7 @@ func (s *Server) handleListCertApplyTemplates(w http.ResponseWriter, r *http.Req
 	claims := claimsFromCtx(r.Context())
 	onlyEnabled := true
 	// 管理员可以查看所有模板（包括禁用的）
-	if claims.Role == "admin" || claims.Role == "super_admin" {
+	if auth.IsAdmin(claims.Role) {
 		onlyEnabled = false
 	}
 
