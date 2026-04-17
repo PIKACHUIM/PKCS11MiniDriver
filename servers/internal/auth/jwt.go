@@ -86,9 +86,17 @@ func (m *Manager) Verify(tokenStr string) (*Claims, error) {
 		return nil, fmt.Errorf("无效的 Token")
 	}
 
-	// 检查黑名单
+	// 检查黑名单（Token 级别）
 	if m.IsBlacklisted(claims.ID) {
 		return nil, fmt.Errorf("Token 已失效（已登出）")
+	}
+
+	// 检查用户级别黑名单（密码重置后所有 Token 失效）
+	m.blacklistMu.RLock()
+	_, userRevoked := m.blacklist["user:"+claims.UserUUID]
+	m.blacklistMu.RUnlock()
+	if userRevoked {
+		return nil, fmt.Errorf("Token 已失效（密码已重置）")
 	}
 
 	return claims, nil
@@ -99,6 +107,17 @@ func (m *Manager) Revoke(tokenID string, expiresAt time.Time) {
 	m.blacklistMu.Lock()
 	defer m.blacklistMu.Unlock()
 	m.blacklist[tokenID] = expiresAt
+}
+
+// RevokeAllForUser 使指定用户的所有 Token 失效（密码重置时调用）。
+// 通过在黑名单中记录用户 UUID 前缀来实现（tokenID 格式为 userUUID-timestamp）。
+func (m *Manager) RevokeAllForUser(userUUID string) {
+	// 使用特殊标记：将 userUUID 加入黑名单，过期时间设为 24 小时后
+	// Verify 时会检查 tokenID 是否以被吊销的 userUUID 开头
+	m.blacklistMu.Lock()
+	defer m.blacklistMu.Unlock()
+	// 使用 "user:" 前缀区分用户级别的吊销
+	m.blacklist["user:"+userUUID] = time.Now().Add(time.Duration(m.expiryHours) * time.Hour)
 }
 
 // IsBlacklisted 检查 Token 是否在黑名单中。

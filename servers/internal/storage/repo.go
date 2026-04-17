@@ -257,10 +257,10 @@ func (r *CertRepo) Create(ctx context.Context, c *Certificate) error {
 
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO certificates (uuid, card_uuid, cert_type, key_type, cert_content, private_data, remark,
-		 order_no, ca_uuid, issuance_tmpl_uuid, storage_policy, revocation_status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 order_no, ca_uuid, serial_number, issuance_tmpl_uuid, storage_policy, revocation_status, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.UUID, c.CardUUID, c.CertType, c.KeyType, c.CertContent, c.PrivateData, c.Remark,
-		c.OrderNo, c.CAUUID, c.IssuanceTmplUUID, c.StoragePolicy, c.RevocationStatus, c.CreatedAt, c.UpdatedAt,
+		c.OrderNo, c.CAUUID, c.SerialNumber, c.IssuanceTmplUUID, c.StoragePolicy, c.RevocationStatus, c.CreatedAt, c.UpdatedAt,
 	)
 	return err
 }
@@ -271,10 +271,10 @@ func (r *CertRepo) GetByUUID(ctx context.Context, certUUID string) (*Certificate
 	var revokedAt sql.NullTime
 	err := r.db.QueryRowContext(ctx,
 		`SELECT uuid, card_uuid, cert_type, key_type, cert_content, private_data, remark,
-		 order_no, ca_uuid, issuance_tmpl_uuid, storage_policy, revocation_status, revoked_at, created_at, updated_at
+		 order_no, ca_uuid, serial_number, issuance_tmpl_uuid, storage_policy, revocation_status, revoked_at, created_at, updated_at
 		 FROM certificates WHERE uuid = ?`, certUUID,
 	).Scan(&c.UUID, &c.CardUUID, &c.CertType, &c.KeyType, &c.CertContent, &c.PrivateData, &c.Remark,
-		&c.OrderNo, &c.CAUUID, &c.IssuanceTmplUUID, &c.StoragePolicy, &c.RevocationStatus, &revokedAt, &c.CreatedAt, &c.UpdatedAt)
+		&c.OrderNo, &c.CAUUID, &c.SerialNumber, &c.IssuanceTmplUUID, &c.StoragePolicy, &c.RevocationStatus, &revokedAt, &c.CreatedAt, &c.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("证书不存在: %s", certUUID)
 	}
@@ -288,7 +288,7 @@ func (r *CertRepo) GetByUUID(ctx context.Context, certUUID string) (*Certificate
 func (r *CertRepo) ListByCard(ctx context.Context, cardUUID string) ([]*Certificate, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT uuid, card_uuid, cert_type, key_type, cert_content, remark,
-		 order_no, ca_uuid, issuance_tmpl_uuid, storage_policy, revocation_status, revoked_at, created_at, updated_at
+		 order_no, ca_uuid, serial_number, issuance_tmpl_uuid, storage_policy, revocation_status, revoked_at, created_at, updated_at
 		 FROM certificates WHERE card_uuid = ? ORDER BY created_at DESC`, cardUUID,
 	)
 	if err != nil {
@@ -301,7 +301,7 @@ func (r *CertRepo) ListByCard(ctx context.Context, cardUUID string) ([]*Certific
 		c := &Certificate{}
 		var revokedAt sql.NullTime
 		if err := rows.Scan(&c.UUID, &c.CardUUID, &c.CertType, &c.KeyType, &c.CertContent, &c.Remark,
-			&c.OrderNo, &c.CAUUID, &c.IssuanceTmplUUID, &c.StoragePolicy, &c.RevocationStatus, &revokedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.OrderNo, &c.CAUUID, &c.SerialNumber, &c.IssuanceTmplUUID, &c.StoragePolicy, &c.RevocationStatus, &revokedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if revokedAt.Valid {
@@ -351,7 +351,7 @@ func (r *CertRepo) ListFiltered(ctx context.Context, userUUID, caUUID, tmplUUID,
 
 	// 查询列表
 	selectQuery := `SELECT c.uuid, c.card_uuid, c.cert_type, c.key_type, c.cert_content, c.remark,
-		 c.order_no, c.ca_uuid, c.issuance_tmpl_uuid, c.storage_policy, c.revocation_status, c.revoked_at, c.created_at, c.updated_at
+		 c.order_no, c.ca_uuid, c.serial_number, c.issuance_tmpl_uuid, c.storage_policy, c.revocation_status, c.revoked_at, c.created_at, c.updated_at
 		 FROM certificates c ` + where + ` ORDER BY c.created_at DESC LIMIT ? OFFSET ?`
 	selectArgs := append(args, pageSize, offset)
 
@@ -366,7 +366,7 @@ func (r *CertRepo) ListFiltered(ctx context.Context, userUUID, caUUID, tmplUUID,
 		c := &Certificate{}
 		var revokedAt sql.NullTime
 		if err := rows.Scan(&c.UUID, &c.CardUUID, &c.CertType, &c.KeyType, &c.CertContent, &c.Remark,
-			&c.OrderNo, &c.CAUUID, &c.IssuanceTmplUUID, &c.StoragePolicy, &c.RevocationStatus, &revokedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.OrderNo, &c.CAUUID, &c.SerialNumber, &c.IssuanceTmplUUID, &c.StoragePolicy, &c.RevocationStatus, &revokedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, 0, err
 		}
 		if revokedAt.Valid {
@@ -425,11 +425,149 @@ func (r *LogRepo) Create(ctx context.Context, l *Log) error {
 	return err
 }
 
+// UpdateRole 更新用户角色。
+func (r *UserRepo) UpdateRole(ctx context.Context, userUUID, role string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET role = ?, updated_at = ? WHERE uuid = ?`,
+		role, time.Now(), userUUID,
+	)
+	return err
+}
+
+// UpdateEnabled 启用或禁用用户账号。
+func (r *UserRepo) UpdateEnabled(ctx context.Context, userUUID string, enabled bool) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET enabled = ?, updated_at = ? WHERE uuid = ?`,
+		boolToInt(enabled), time.Now(), userUUID,
+	)
+	return err
+}
+
+// Delete 删除用户。
+func (r *UserRepo) Delete(ctx context.Context, userUUID string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM users WHERE uuid = ?`, userUUID)
+	return err
+}
+
+// ListUsers 分页查询用户列表，支持关键字搜索。
+func (r *UserRepo) ListUsers(ctx context.Context, keyword string, page, pageSize int) ([]*User, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	offset := (page - 1) * pageSize
+
+	where := `WHERE 1=1`
+	var args []interface{}
+	if keyword != "" {
+		where += ` AND (username LIKE ? OR email LIKE ? OR display_name LIKE ?)`
+		like := "%" + keyword + "%"
+		args = append(args, like, like, like)
+	}
+
+	var total int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT uuid, username, display_name, email, role, enabled, failed_attempts, locked_until, created_at, updated_at
+		 FROM users `+where+` ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+		append(args, pageSize, offset)...,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var users []*User
+	for rows.Next() {
+		u := &User{}
+		var enabled, failedAttempts int
+		var lockedUntil sql.NullTime
+		if err := rows.Scan(&u.UUID, &u.Username, &u.DisplayName, &u.Email, &u.Role,
+			&enabled, &failedAttempts, &lockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, 0, err
+		}
+		u.Enabled = enabled == 1
+		u.FailedAttempts = failedAttempts
+		if lockedUntil.Valid {
+			u.LockedUntil = &lockedUntil.Time
+		}
+		users = append(users, u)
+	}
+	return users, total, rows.Err()
+}
+
+// ---- LogRepo 扩展 ----
+
+// List 分页查询操作日志，支持按用户、操作类型、时间范围筛选。
+func (r *LogRepo) List(ctx context.Context, userUUID, action, startTime, endTime string, page, pageSize int) ([]*Log, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	offset := (page - 1) * pageSize
+
+	where := `WHERE 1=1`
+	var args []interface{}
+	if userUUID != "" {
+		where += ` AND user_uuid = ?`
+		args = append(args, userUUID)
+	}
+	if action != "" {
+		where += ` AND action LIKE ?`
+		args = append(args, "%"+action+"%")
+	}
+	if startTime != "" {
+		where += ` AND recorded_at >= ?`
+		args = append(args, startTime)
+	}
+	if endTime != "" {
+		where += ` AND recorded_at <= ?`
+		args = append(args, endTime)
+	}
+
+	var total int
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM logs `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, user_uuid, card_uuid, cert_uuid, action, ip_addr, user_agent, recorded_at
+		 FROM logs `+where+` ORDER BY recorded_at DESC LIMIT ? OFFSET ?`,
+		append(args, pageSize, offset)...,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var logs []*Log
+	for rows.Next() {
+		l := &Log{}
+		if err := rows.Scan(&l.ID, &l.UserUUID, &l.CardUUID, &l.CertUUID, &l.Action, &l.IPAddr, &l.UserAgent, &l.RecordedAt); err != nil {
+			return nil, 0, err
+		}
+		logs = append(logs, l)
+	}
+	return logs, total, rows.Err()
+}
+
 // ---- 工具函数 ----
 
-func boolToInt(b bool) int {
+// BoolToInt 将 bool 转换为 int（1/0），供各包使用。
+func BoolToInt(b bool) int {
 	if b {
 		return 1
 	}
 	return 0
+}
+
+func boolToInt(b bool) int {
+	return BoolToInt(b)
 }

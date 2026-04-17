@@ -21,13 +21,36 @@ func NewService(db *storage.DB) *Service {
 	return &Service{db: db}
 }
 
-// CreateOrder 创建证书订单。
+// CreateOrder 创建证书订单（检查余额并冻结金额）。
 func (s *Service) CreateOrder(ctx context.Context, o *storage.CertOrder) error {
 	o.UUID = uuid.New().String()
 	o.CreatedAt = time.Now()
 	o.UpdatedAt = time.Now()
 	if o.Status == "" {
 		o.Status = storage.OrderStatusPending
+	}
+
+	// 如果有定价，检查用户余额
+	if o.AmountCents > 0 {
+		var availableCents int64
+		err := s.db.QueryRowContext(ctx,
+			`SELECT available_cents FROM user_balances WHERE user_uuid = ?`, o.UserUUID,
+		).Scan(&availableCents)
+		if err != nil {
+			return fmt.Errorf("查询余额失败，请先充值")
+		}
+		if availableCents < o.AmountCents {
+			return fmt.Errorf("余额不足，当前余额 %d 分，需要 %d 分", availableCents, o.AmountCents)
+		}
+
+		// 冻结金额（扣减可用余额，增加冻结余额）
+		_, err = s.db.ExecContext(ctx,
+			`UPDATE user_balances SET available_cents = available_cents - ?, frozen_cents = frozen_cents + ? WHERE user_uuid = ?`,
+			o.AmountCents, o.AmountCents, o.UserUUID,
+		)
+		if err != nil {
+			return fmt.Errorf("冻结金额失败: %w", err)
+		}
 	}
 
 	_, err := s.db.ExecContext(ctx,
@@ -172,21 +195,117 @@ func (s *Service) ListApplications(ctx context.Context, userUUID string, statusF
 }
 
 // ApproveApplication 审批通过证书申请。
+// 审批通过后自动更新订单状态，将冻结金额转为消费。
 func (s *Service) ApproveApplication(ctx context.Context, appUUID, adminUUID string) error {
 	now := time.Now()
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE cert_applications SET status = 'approved', approved_by = ?, approved_at = ?, updated_at = ? WHERE uuid = ? AND status = 'pending'`,
+
+	// 查询申请信息
+	app := &storage.CertApplication{}
+	var approvedBy sql.NullString
+	var approvedAt sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		`SELECT uuid, order_uuid, user_uuid, subject_json, san_json, key_type, status
+		 FROM cert_applications WHERE uuid = ?`, appUUID,
+	).Scan(&app.UUID, &app.OrderUUID, &app.UserUUID, &app.SubjectJSON, &app.SANJSON, &app.KeyType, &app.Status)
+	if err != nil {
+		return fmt.Errorf("查询申请失败: %w", err)
+	}
+	_ = approvedBy
+	_ = approvedAt
+
+	if app.Status != "pending" {
+		return fmt.Errorf("只能审批待处理的申请，当前状态: %s", app.Status)
+	}
+
+	// 更新申请状态为 approved
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE cert_applications SET status = 'approved', approved_by = ?, approved_at = ?, updated_at = ? WHERE uuid = ?`,
 		adminUUID, now, now, appUUID,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("更新申请状态失败: %w", err)
+	}
+
+	// 更新关联订单状态为 issued
+	if app.OrderUUID != "" {
+		_, err = s.db.ExecContext(ctx,
+			`UPDATE cert_orders SET status = 'issued', updated_at = ? WHERE uuid = ?`,
+			now, app.OrderUUID,
+		)
+		if err != nil {
+			return fmt.Errorf("更新订单状态失败: %w", err)
+		}
+
+		// 查询订单金额，将冻结金额转为消费
+		var orderAmount int64
+		var orderUserUUID string
+		err = s.db.QueryRowContext(ctx,
+			`SELECT user_uuid, amount_cents FROM cert_orders WHERE uuid = ?`, app.OrderUUID,
+		).Scan(&orderUserUUID, &orderAmount)
+		if err == nil && orderAmount > 0 {
+			// 扣减冻结金额
+			s.db.ExecContext(ctx, //nolint:errcheck
+				`UPDATE user_balances SET frozen_cents = frozen_cents - ? WHERE user_uuid = ?`,
+				orderAmount, orderUserUUID,
+			)
+			// 写入消费记录
+			consumeUUID := uuid.New().String()
+			s.db.ExecContext(ctx, //nolint:errcheck
+				`INSERT INTO consume_records (uuid, user_uuid, order_no, consume_type, amount_cents, remark, created_at)
+				 VALUES (?, ?, ?, 'cert_purchase', ?, '证书签发消费', ?)`,
+				consumeUUID, orderUserUUID, app.OrderUUID, orderAmount, now,
+			)
+		}
+	}
+
+	return nil
 }
 
-// RejectApplication 拒绝证书申请。
+// RejectApplication 拒绝证书申请（解冻冻结金额）。
 func (s *Service) RejectApplication(ctx context.Context, appUUID, adminUUID, reason string) error {
 	now := time.Now()
-	_, err := s.db.ExecContext(ctx,
+
+	// 查询申请信息
+	var orderUUID, userUUID, status string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT order_uuid, user_uuid, status FROM cert_applications WHERE uuid = ?`, appUUID,
+	).Scan(&orderUUID, &userUUID, &status)
+	if err != nil {
+		return fmt.Errorf("查询申请失败: %w", err)
+	}
+
+	if status != "pending" {
+		return fmt.Errorf("只能拒绝待处理的申请，当前状态: %s", status)
+	}
+
+	// 更新申请状态为 rejected
+	_, err = s.db.ExecContext(ctx,
 		`UPDATE cert_applications SET status = 'rejected', approved_by = ?, approved_at = ?, reject_reason = ?, updated_at = ? WHERE uuid = ? AND status = 'pending'`,
 		adminUUID, now, reason, now, appUUID,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("更新申请状态失败: %w", err)
+	}
+
+	// 解冻冻结金额
+	if orderUUID != "" {
+		var orderAmount int64
+		err = s.db.QueryRowContext(ctx,
+			`SELECT amount_cents FROM cert_orders WHERE uuid = ?`, orderUUID,
+		).Scan(&orderAmount)
+		if err == nil && orderAmount > 0 {
+			// 解冻金额退回可用余额
+			s.db.ExecContext(ctx, //nolint:errcheck
+				`UPDATE user_balances SET available_cents = available_cents + ?, frozen_cents = frozen_cents - ? WHERE user_uuid = ?`,
+				orderAmount, orderAmount, userUUID,
+			)
+			// 更新订单状态为 rejected
+			s.db.ExecContext(ctx, //nolint:errcheck
+				`UPDATE cert_orders SET status = 'rejected', updated_at = ? WHERE uuid = ?`,
+				now, orderUUID,
+			)
+		}
+	}
+
+	return nil
 }

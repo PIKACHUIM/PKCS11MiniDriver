@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS certificates (
     remark             TEXT NOT NULL DEFAULT '',
     order_no           TEXT NOT NULL DEFAULT '',
     ca_uuid            TEXT NOT NULL DEFAULT '',
+    serial_number      TEXT NOT NULL DEFAULT '',  -- X.509 序列号（十六进制）
     issuance_tmpl_uuid TEXT NOT NULL DEFAULT '',
     storage_policy     TEXT NOT NULL DEFAULT '',
     revocation_status  TEXT NOT NULL DEFAULT 'active',

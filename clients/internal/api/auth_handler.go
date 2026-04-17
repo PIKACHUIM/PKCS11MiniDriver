@@ -63,6 +63,11 @@ func deleteSession(token string) {
 	sessionMu.Unlock()
 }
 
+// isValidSession 检查 token 是否为有效的登录 session（供中间件使用）。
+func isValidSession(token string) bool {
+	return getSession(token) != nil
+}
+
 // authTokenResponse 是登录/注册成功的响应体。
 type authTokenResponse struct {
 	Token     string `json:"token"`

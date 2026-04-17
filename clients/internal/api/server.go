@@ -31,6 +31,10 @@ type Server struct {
 	rateLimiter *middleware.RateLimiter
 	metrics     *middleware.Metrics
 	totpStore   *totp.Store
+	// PKI 仓库
+	csrRepo     *storage.CSRRepo
+	caRepo      *storage.CARepo
+	pkiCertRepo *storage.PKICertRepo
 }
 
 // NewServer 创建 API 服务实例。
@@ -40,7 +44,7 @@ func NewServer(cfg *config.APIConfig, manager *card.Manager, db *storage.DB) *Se
 		mux:         http.NewServeMux(),
 		manager:     manager,
 		db:          db,
-		userRepo:    storage.NewUserRepo(db),
+	userRepo:    storage.NewUserRepo(db),
 		cardRepo:    storage.NewCardRepo(db),
 		certRepo:    storage.NewCertRepo(db),
 		logRepo:     storage.NewLogRepo(db),
@@ -48,6 +52,9 @@ func NewServer(cfg *config.APIConfig, manager *card.Manager, db *storage.DB) *Se
 		rateLimiter: middleware.NewRateLimiter(100),
 		metrics:     middleware.NewMetrics(),
 		totpStore:   totp.NewStore(db.Conn()),
+		csrRepo:     storage.NewCSRRepo(db),
+		caRepo:      storage.NewCARepo(db),
+		pkiCertRepo: storage.NewPKICertRepo(db),
 	}
 
 	// 初始化 TOTP 表
@@ -71,6 +78,10 @@ func NewServer(cfg *config.APIConfig, manager *card.Manager, db *storage.DB) *Se
 		slog.Warn("初始化本地认证 Token 失败，API 将不启用认证", "error", err)
 	} else {
 		s.authToken = authToken
+		// 注入 session token 验证函数，使用户登录 token 也能通过认证
+		authToken.SetSessionValidator(func(token string) bool {
+			return isValidSession(token)
+		})
 	}
 
 	// 检查绑定地址安全性
@@ -138,11 +149,36 @@ func (s *Server) registerRoutes() {
 
 	// ---- 本地 PKI 工具 ----
 	s.mux.HandleFunc("POST /api/pki/selfsign", s.handleSelfSign)
-	s.mux.HandleFunc("POST /api/pki/csr", s.handleGenerateCSR)
-	s.mux.HandleFunc("POST /api/pki/ca", s.handleCreateLocalCA)
-	s.mux.HandleFunc("POST /api/pki/ca/issue", s.handleIssueCert)
 	s.mux.HandleFunc("POST /api/pki/convert", s.handleConvertCert)
 	s.mux.HandleFunc("POST /api/pki/parse", s.handleParseCert)
+
+	// CSR 管理
+	s.mux.HandleFunc("GET /api/pki/csr", s.handleListCSR)
+	s.mux.HandleFunc("POST /api/pki/csr", s.handleCreateCSR)
+	s.mux.HandleFunc("GET /api/pki/csr/{uuid}", s.handleGetCSR)
+	s.mux.HandleFunc("DELETE /api/pki/csr/{uuid}", s.handleDeleteCSR)
+	s.mux.HandleFunc("GET /api/pki/csr/{uuid}/download", s.handleDownloadCSR)
+
+	// CA 管理
+	s.mux.HandleFunc("GET /api/pki/ca", s.handleListCA)
+	s.mux.HandleFunc("POST /api/pki/ca", s.handleCreateCA)
+	s.mux.HandleFunc("POST /api/pki/ca/import", s.handleImportCA)
+	s.mux.HandleFunc("GET /api/pki/ca/{uuid}", s.handleGetCA)
+	s.mux.HandleFunc("POST /api/pki/ca/{uuid}/revoke", s.handleRevokeCA)
+	s.mux.HandleFunc("DELETE /api/pki/ca/{uuid}", s.handleDeleteCA)
+	s.mux.HandleFunc("GET /api/pki/ca/{uuid}/export", s.handleExportCA)
+
+	// 证书管理
+	s.mux.HandleFunc("GET /api/pki/certs", s.handleListPKICerts)
+	s.mux.HandleFunc("POST /api/pki/certs/issue", s.handleIssuePKICert)
+	s.mux.HandleFunc("POST /api/pki/certs/selfsign", s.handleSelfSignFromCSR)
+	s.mux.HandleFunc("POST /api/pki/certs/import", s.handleImportPKICert)
+	s.mux.HandleFunc("GET /api/pki/certs/{uuid}", s.handleGetPKICert)
+	s.mux.HandleFunc("DELETE /api/pki/certs/{uuid}", s.handleDeletePKICert)
+	s.mux.HandleFunc("DELETE /api/pki/certs/{uuid}/key", s.handleDeletePKICertKey)
+	s.mux.HandleFunc("POST /api/pki/certs/{uuid}/export", s.handleExportPKICert)
+	s.mux.HandleFunc("POST /api/pki/certs/{uuid}/import-to-card", s.handleImportPKICertToCard)
+	s.mux.HandleFunc("POST /api/pki/certs/{uuid}/revoke", s.handleRevokePKICert)
 
 	// ---- 应用指标 ----
 	s.mux.HandleFunc("GET /metrics", s.metrics.Handler())

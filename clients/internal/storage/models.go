@@ -151,3 +151,86 @@ type Log struct {
 	Title      string    `json:"title"`
 	Content    string    `json:"content"`
 }
+
+// ---- PKI 模型 ----
+
+// KeyStorage 是 CSR/证书密钥存储位置。
+type KeyStorage string
+
+const (
+	KeyStorageDatabase  KeyStorage = "database"  // 私钥存储在本地数据库
+	KeyStorageSmartcard KeyStorage = "smartcard"  // 私钥在智能卡上生成，不可导出
+	KeyStorageImported  KeyStorage = "imported"   // 外部导入，来源不明
+)
+
+// CSRRecord 是 CSR 请求记录。
+type CSRRecord struct {
+	UUID          string     `json:"uuid"`
+	CommonName    string     `json:"common_name"`
+	Organization  string     `json:"organization"`
+	OrgUnit       string     `json:"org_unit"`
+	Country       string     `json:"country"`
+	State         string     `json:"state"`
+	Locality      string     `json:"locality"`
+	Email         string     `json:"email"`
+	KeyType       string     `json:"key_type"`
+	KeyStorage    KeyStorage `json:"key_storage"`
+	CardUUID      string     `json:"card_uuid"`      // KeyStorage=smartcard 时有效
+	SANDN         string     `json:"san_dns"`        // 逗号分隔
+	SANIP         string     `json:"san_ip"`
+	SANEmail      string     `json:"san_email"`
+	SANURI        string     `json:"san_uri"`
+	KeyUsage      string     `json:"key_usage"`      // JSON 数组序列化
+	ExtKeyUsage   string     `json:"ext_key_usage"`  // JSON 数组序列化
+	CSRPEM        string     `json:"csr_pem"`
+	HasPrivateKey bool       `json:"has_private_key"`
+	PrivateKeyEnc []byte     `json:"-"`              // AES256 加密的私钥（database 模式）
+	Remark        string     `json:"remark"`
+	CreatedAt     time.Time  `json:"created_at"`
+}
+
+// LocalCA 是本地 CA 机构记录。
+type LocalCA struct {
+	UUID         string    `json:"uuid"`
+	Name         string    `json:"name"`
+	CommonName   string    `json:"common_name"`
+	Organization string    `json:"organization"`
+	Country      string    `json:"country"`
+	KeyType      string    `json:"key_type"`
+	CertPEM      string    `json:"cert_pem"`
+	ChainPEM     string    `json:"chain_pem"`      // 证书链（可选）
+	HasPrivKey   bool      `json:"has_priv_key"`   // 是否有私钥（有才能签发）
+	PrivKeyEnc   []byte    `json:"-"`              // AES256 加密的私钥
+	CardUUID     string    `json:"card_uuid"`      // 私钥存储在智能卡时有效
+	NotBefore    time.Time `json:"not_before"`
+	NotAfter     time.Time `json:"not_after"`
+	IssuedCount  int       `json:"issued_count"`
+	Revoked      bool      `json:"revoked"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// PKICert 是 PKI 证书记录。
+type PKICert struct {
+	UUID          string     `json:"uuid"`
+	CommonName    string     `json:"common_name"`
+	SerialNumber  string     `json:"serial_number"`
+	CAUUID        string     `json:"ca_uuid"`
+	CAName        string     `json:"ca_name"`
+	CSRUUID       string     `json:"csr_uuid"`
+	KeyType       string     `json:"key_type"`
+	KeyStorage    KeyStorage `json:"key_storage"`
+	CardUUID      string     `json:"card_uuid"`
+	CertPEM       string     `json:"cert_pem"`
+	HasPrivateKey bool       `json:"has_private_key"`
+	PrivateKeyEnc []byte     `json:"-"`             // AES256 加密的私钥
+	NotBefore     time.Time  `json:"not_before"`
+	NotAfter      time.Time  `json:"not_after"`
+	KeyUsage      string     `json:"key_usage"`     // JSON 数组序列化
+	ExtKeyUsage   string     `json:"ext_key_usage"` // JSON 数组序列化
+	SANDN         string     `json:"san_dns"`
+	SANIP         string     `json:"san_ip"`
+	SANEmail      string     `json:"san_email"`
+	Revoked       bool       `json:"revoked"`
+	Remark        string     `json:"remark"`
+	CreatedAt     time.Time  `json:"created_at"`
+}

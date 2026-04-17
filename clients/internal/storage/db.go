@@ -267,4 +267,82 @@ CREATE INDEX IF NOT EXISTS idx_cards_user_uuid ON cards(user_uuid);
 CREATE INDEX IF NOT EXISTS idx_certs_card_uuid ON certificates(card_uuid);
 CREATE INDEX IF NOT EXISTS idx_logs_recorded_at ON logs(recorded_at);
 CREATE INDEX IF NOT EXISTS idx_logs_card_uuid ON logs(card_uuid);
+
+-- PKI CSR 表
+CREATE TABLE IF NOT EXISTS pki_csrs (
+    uuid            TEXT PRIMARY KEY,
+    common_name     TEXT NOT NULL,
+    organization    TEXT NOT NULL DEFAULT '',
+    org_unit        TEXT NOT NULL DEFAULT '',
+    country         TEXT NOT NULL DEFAULT '',
+    state           TEXT NOT NULL DEFAULT '',
+    locality        TEXT NOT NULL DEFAULT '',
+    email           TEXT NOT NULL DEFAULT '',
+    key_type        TEXT NOT NULL,
+    key_storage     TEXT NOT NULL DEFAULT 'database',  -- database / smartcard
+    card_uuid       TEXT NOT NULL DEFAULT '',
+    san_dns         TEXT NOT NULL DEFAULT '',
+    san_ip          TEXT NOT NULL DEFAULT '',
+    san_email       TEXT NOT NULL DEFAULT '',
+    san_uri         TEXT NOT NULL DEFAULT '',
+    key_usage       TEXT NOT NULL DEFAULT '[]',        -- JSON 数组
+    ext_key_usage   TEXT NOT NULL DEFAULT '[]',        -- JSON 数组
+    csr_pem         TEXT NOT NULL,
+    has_private_key INTEGER NOT NULL DEFAULT 0,
+    private_key_enc BLOB,                              -- AES256 加密的私钥
+    remark          TEXT NOT NULL DEFAULT '',
+    created_at      DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+-- PKI CA 表
+CREATE TABLE IF NOT EXISTS pki_cas (
+    uuid            TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    common_name     TEXT NOT NULL,
+    organization    TEXT NOT NULL DEFAULT '',
+    country         TEXT NOT NULL DEFAULT '',
+    key_type        TEXT NOT NULL,
+    cert_pem        TEXT NOT NULL,
+    chain_pem       TEXT NOT NULL DEFAULT '',
+    has_priv_key    INTEGER NOT NULL DEFAULT 0,
+    priv_key_enc    BLOB,                              -- AES256 加密的私钥
+    card_uuid       TEXT NOT NULL DEFAULT '',
+    not_before      DATETIME NOT NULL,
+    not_after       DATETIME NOT NULL,
+    issued_count    INTEGER NOT NULL DEFAULT 0,
+    revoked         INTEGER NOT NULL DEFAULT 0,
+    created_at      DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+-- PKI 证书表
+CREATE TABLE IF NOT EXISTS pki_certs (
+    uuid            TEXT PRIMARY KEY,
+    common_name     TEXT NOT NULL,
+    serial_number   TEXT NOT NULL DEFAULT '',
+    ca_uuid         TEXT NOT NULL DEFAULT '',
+    ca_name         TEXT NOT NULL DEFAULT '',
+    csr_uuid        TEXT NOT NULL DEFAULT '',
+    key_type        TEXT NOT NULL,
+    key_storage     TEXT NOT NULL DEFAULT 'database',
+    card_uuid       TEXT NOT NULL DEFAULT '',
+    cert_pem        TEXT NOT NULL,
+    has_private_key INTEGER NOT NULL DEFAULT 0,
+    private_key_enc BLOB,
+    not_before      DATETIME NOT NULL,
+    not_after       DATETIME NOT NULL,
+    key_usage       TEXT NOT NULL DEFAULT '[]',
+    ext_key_usage   TEXT NOT NULL DEFAULT '[]',
+    san_dns         TEXT NOT NULL DEFAULT '',
+    san_ip          TEXT NOT NULL DEFAULT '',
+    san_email       TEXT NOT NULL DEFAULT '',
+    revoked         INTEGER NOT NULL DEFAULT 0,
+    remark          TEXT NOT NULL DEFAULT '',
+    created_at      DATETIME NOT NULL DEFAULT (datetime('now'))
+);
+
+-- PKI 索引
+CREATE INDEX IF NOT EXISTS idx_pki_csrs_created_at ON pki_csrs(created_at);
+CREATE INDEX IF NOT EXISTS idx_pki_cas_created_at ON pki_cas(created_at);
+CREATE INDEX IF NOT EXISTS idx_pki_certs_ca_uuid ON pki_certs(ca_uuid);
+CREATE INDEX IF NOT EXISTS idx_pki_certs_created_at ON pki_certs(created_at);
 `

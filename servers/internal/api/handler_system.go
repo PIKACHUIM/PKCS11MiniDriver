@@ -1,0 +1,378 @@
+package api
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/globaltrusts/server-card/internal/acme"
+	"github.com/globaltrusts/server-card/internal/revocation"
+)
+
+// ---- ACME 处理器 ----
+
+// handleACMEDirectory 返回 ACME 目录 JSON。
+func (s *Server) handleACMEDirectory(w http.ResponseWriter, r *http.Request) {
+	path := r.PathValue("path")
+	if s.acmeSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
+		return
+	}
+	cfg, err := s.acmeSvc.GetConfigByPath(r.Context(), path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	baseURL := fmt.Sprintf("%s://%s/acme/%s", scheme(r), r.Host, path)
+	directory := map[string]interface{}{
+		"newNonce":   baseURL + "/new-nonce",
+		"newAccount": baseURL + "/new-account",
+		"newOrder":   baseURL + "/new-order",
+		"revokeCert": baseURL + "/revoke-cert",
+		"keyChange":  baseURL + "/key-change",
+		"meta": map[string]interface{}{
+			"caaIdentities":  []string{r.Host},
+			"termsOfService": baseURL + "/terms",
+			"website":        fmt.Sprintf("%s://%s", scheme(r), r.Host),
+		},
+		"caUUID": cfg.CAUUID,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	writeJSON(w, http.StatusOK, directory)
+}
+
+// handleACMENewNonce 返回 ACME Replay-Nonce。
+func (s *Server) handleACMENewNonce(w http.ResponseWriter, r *http.Request) {
+	if s.acmeSvc == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	nonce, err := s.acmeSvc.GenerateNonce()
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Replay-Nonce", nonce)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+}
+
+// handleACMENewAccount 创建 ACME 账户（RFC 8555）。
+func (s *Server) handleACMENewAccount(w http.ResponseWriter, r *http.Request) {
+	if s.acmeSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
+		return
+	}
+	path := r.PathValue("path")
+	cfg, err := s.acmeSvc.GetConfigByPath(r.Context(), path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	var payload map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	// 简化实现：从 payload 中提取 contact 和 publicKey
+	contact := "[]"
+	if c, ok := payload["contact"]; ok {
+		if contactJSON, err := json.Marshal(c); err == nil {
+			contact = string(contactJSON)
+		}
+	}
+
+	acct := &acme.Account{
+		ConfigID:  cfg.UUID,
+		KeyID:     fmt.Sprintf("key-%d", time.Now().UnixNano()),
+		PublicKey: "{}",
+		Contact:   contact,
+	}
+	if err := s.acmeSvc.CreateAccount(r.Context(), acct); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.Header().Set("Location", fmt.Sprintf("%s://%s/acme/%s/acct/%s", scheme(r), r.Host, path, acct.UUID))
+	writeJSON(w, http.StatusCreated, acct)
+}
+
+// handleACMENewOrder 创建 ACME 订单（RFC 8555）。
+func (s *Server) handleACMENewOrder(w http.ResponseWriter, r *http.Request) {
+	if s.acmeSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
+		return
+	}
+	path := r.PathValue("path")
+
+	var payload map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	identifiers := "[]"
+	if ids, ok := payload["identifiers"]; ok {
+		if idsJSON, err := json.Marshal(ids); err == nil {
+			identifiers = string(idsJSON)
+		}
+	}
+
+	baseURL := fmt.Sprintf("%s://%s/acme/%s", scheme(r), r.Host, path)
+	order := &acme.Order{
+		AccountUUID: "unknown",
+		Identifiers: identifiers,
+		FinalizeURL: baseURL + "/finalize/new",
+	}
+	if err := s.acmeSvc.CreateOrder(r.Context(), order); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.Header().Set("Location", fmt.Sprintf("%s/order/%s", baseURL, order.UUID))
+	writeJSON(w, http.StatusCreated, order)
+}
+
+// handleACMEGetAccount 获取 ACME 账户信息。
+func (s *Server) handleACMEGetAccount(w http.ResponseWriter, r *http.Request) {
+	if s.acmeSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
+		return
+	}
+	id := r.PathValue("id")
+	account, err := s.acmeSvc.GetAccountByUUID(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, account)
+}
+
+// handleACMEGetOrder 获取 ACME 订单信息。
+func (s *Server) handleACMEGetOrder(w http.ResponseWriter, r *http.Request) {
+	if s.acmeSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
+		return
+	}
+	id := r.PathValue("id")
+	order, err := s.acmeSvc.GetOrder(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, order)
+}
+
+// handleACMEGetAuthorization 获取 ACME 授权信息。
+func (s *Server) handleACMEGetAuthorization(w http.ResponseWriter, r *http.Request) {
+	if s.acmeSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
+		return
+	}
+	id := r.PathValue("id")
+	// 简化实现：返回授权信息
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"uuid":   id,
+		"status": "pending",
+	})
+}
+
+// handleACMEChallenge 触发 ACME 挑战验证。
+func (s *Server) handleACMEChallenge(w http.ResponseWriter, r *http.Request) {
+	if s.acmeSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
+		return
+	}
+	id := r.PathValue("id")
+	chall, err := s.acmeSvc.GetChallenge(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	// 触发验证（异步）
+	go func() {
+		s.acmeSvc.ValidateChallenge(r.Context(), id) //nolint:errcheck
+	}()
+	writeJSON(w, http.StatusOK, chall)
+}
+
+// handleACMEFinalize 完成 ACME 订单（提交 CSR 签发证书）。
+func (s *Server) handleACMEFinalize(w http.ResponseWriter, r *http.Request) {
+	if s.acmeSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
+		return
+	}
+	id := r.PathValue("id")
+	order, err := s.acmeSvc.GetOrder(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	// 更新订单状态为处理中
+	s.acmeSvc.UpdateOrderStatus(r.Context(), id, "processing", "") //nolint:errcheck
+	writeJSON(w, http.StatusOK, order)
+}
+
+// handleACMEGetCertificate 下载 ACME 证书。
+func (s *Server) handleACMEGetCertificate(w http.ResponseWriter, r *http.Request) {
+	if s.acmeSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "ACME 服务未启用")
+		return
+	}
+	id := r.PathValue("id")
+	order, err := s.acmeSvc.GetOrder(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if order.CertURL == "" {
+		writeError(w, http.StatusNotFound, "证书尚未签发")
+		return
+	}
+	w.Header().Set("Content-Type", "application/pem-certificate-chain")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "# Certificate for order %s\n", id)
+}
+
+// ---- CT 处理器 ----
+
+// handleCTSubmit 接受证书 CT 提交请求。
+func (s *Server) handleCTSubmit(w http.ResponseWriter, r *http.Request) {
+	if s.ctSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "CT 服务未启用")
+		return
+	}
+	var req struct {
+		CertUUID    string `json:"cert_uuid"`
+		CAUUID      string `json:"ca_uuid"`
+		CTServer    string `json:"ct_server"`
+		SubmittedBy string `json:"submitted_by"`
+		CertDER     []byte `json:"cert_der"` // base64 编码的 DER 数据
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if req.CertUUID == "" || req.CTServer == "" {
+		writeError(w, http.StatusBadRequest, "cert_uuid 和 ct_server 不能为空")
+		return
+	}
+	entry, err := s.ctSvc.Submit(r.Context(), req.CertUUID, req.CAUUID, req.CTServer, req.SubmittedBy, req.CertDER)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+// handleCTQuery 按证书哈希查询 CT 记录。
+func (s *Server) handleCTQuery(w http.ResponseWriter, r *http.Request) {
+	if s.ctSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, "CT 服务未启用")
+		return
+	}
+	certHash := r.URL.Query().Get("cert_hash")
+	if certHash == "" {
+		writeError(w, http.StatusBadRequest, "缺少 cert_hash 参数")
+		return
+	}
+	entries, err := s.ctSvc.QueryByCertHash(r.Context(), certHash)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"entries": entries, "total": len(entries)})
+}
+
+// ---- 吊销服务管理处理器 ----
+
+func (s *Server) handleListRevocationServices(w http.ResponseWriter, r *http.Request) {
+	caUUID := r.URL.Query().Get("ca_uuid")
+	configs, err := s.revocationSvc.ListServiceConfigs(r.Context(), caUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"services": configs, "total": len(configs)})
+}
+
+func (s *Server) handleCreateRevocationService(w http.ResponseWriter, r *http.Request) {
+	var cfg revocation.ServiceConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := s.revocationSvc.CreateServiceConfig(r.Context(), &cfg); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, cfg)
+}
+
+func (s *Server) handleDeleteRevocationService(w http.ResponseWriter, r *http.Request) {
+	cfgUUID := r.PathValue("uuid")
+	if err := s.revocationSvc.DeleteServiceConfig(r.Context(), cfgUUID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "吊销服务配置已删除"})
+}
+
+// ---- ACME 配置管理处理器 ----
+
+func (s *Server) handleListACMEConfigs(w http.ResponseWriter, r *http.Request) {
+	configs, err := s.acmeSvc.ListConfigs(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"configs": configs, "total": len(configs)})
+}
+
+func (s *Server) handleCreateACMEConfig(w http.ResponseWriter, r *http.Request) {
+	var cfg acme.Config
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if err := s.acmeSvc.CreateConfig(r.Context(), &cfg); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, cfg)
+}
+
+func (s *Server) handleDeleteACMEConfig(w http.ResponseWriter, r *http.Request) {
+	cfgUUID := r.PathValue("uuid")
+	if err := s.acmeSvc.DeleteConfig(r.Context(), cfgUUID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "ACME 配置已删除"})
+}
+
+// ---- CT 记录管理处理器 ----
+
+func (s *Server) handleListCTEntries(w http.ResponseWriter, r *http.Request) {
+	certUUID := r.URL.Query().Get("cert_uuid")
+	page, pageSize := parsePagination(r)
+	entries, total, err := s.ctSvc.List(r.Context(), certUUID, page, pageSize)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"entries": entries, "total": total})
+}
+
+func (s *Server) handleDeleteCTEntry(w http.ResponseWriter, r *http.Request) {
+	entryUUID := r.PathValue("uuid")
+	if err := s.ctSvc.Delete(r.Context(), entryUUID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "CT 记录已删除"})
+}

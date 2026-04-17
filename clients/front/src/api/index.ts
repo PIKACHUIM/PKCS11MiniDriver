@@ -1,0 +1,237 @@
+import axios from 'axios';
+import type {
+  User, Card, Certificate, Log, SlotInfo,
+  CreateUserRequest, CreateCardRequest, KeyGenRequest,
+  TOTPEntry, TOTPCodeResponse, CreateTOTPRequest,
+  LocalCA, SelfSignRequest, CSRRequest, CSRResponse,
+  CreateCSRRequest, CSRRecord, CreateCARequest, ImportCARequest,
+  PKICert, IssueCertRequest, ImportCertRequest, ExportCertFormat,
+  LoginRequest, AuthToken,
+} from '../types';
+
+// Manager 连接 client-card :1026
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:1026';
+
+const http = axios.create({
+  baseURL: BASE_URL,
+  timeout: 30000,
+  headers: { 'Content-Type': 'application/json' },
+});
+
+// 请求拦截器：自动注入 Authorization 头
+http.interceptors.request.use((config) => {
+  const token = localStorage.getItem('auth_token');
+  if (token) {
+    config.headers['Authorization'] = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// 响应拦截器：统一错误处理，并提取 {code, message, data} 包装格式中的 data
+http.interceptors.response.use(
+  (res) => {
+    // 后端统一返回 { code, message, data } 格式，提取 data 字段
+    if (res.data && typeof res.data === 'object' && 'code' in res.data) {
+      if (res.data.code !== 0) {
+        return Promise.reject(new Error(res.data.message || '请求失败'));
+      }
+      res.data = res.data.data;
+    }
+    return res;
+  },
+  (err) => {
+    const msg = err.response?.data?.message || err.message || '请求失败';
+    return Promise.reject(new Error(msg));
+  }
+);
+
+// ---- 认证 ----
+export const login = (data: LoginRequest) =>
+  http.post<AuthToken>('/api/auth/login', data).then((r) => r.data);
+
+// ---- 健康检查 ----
+export const getHealth = () =>
+  http.get<{ status: string; version: string }>('/api/health').then((r) => r.data);
+
+// ---- Slot 状态 ----
+export const getSlots = () =>
+  http.get<SlotInfo[]>('/api/slots').then((r) => r.data);
+
+// ---- 用户管理（本地用户） ----
+export const getUsers = (params?: { page?: number; page_size?: number }) =>
+  http.get<User[]>('/api/users', { params }).then((r) => ({ items: r.data ?? [], total: (r.data ?? []).length }));
+
+export const getUser = (uuid: string) =>
+  http.get<User>(`/api/users/${uuid}`).then((r) => r.data);
+
+export const createUser = (data: CreateUserRequest) =>
+  http.post<User>('/api/users', data).then((r) => r.data);
+
+export const updateUser = (uuid: string, data: Partial<CreateUserRequest & { enabled: boolean }>) =>
+  http.put<User>(`/api/users/${uuid}`, data).then((r) => r.data);
+
+export const deleteUser = (uuid: string) =>
+  http.delete(`/api/users/${uuid}`).then((r) => r.data);
+
+// ---- 卡片管理 ----
+export const getCards = (params?: { user_uuid?: string; page?: number; page_size?: number }) =>
+  http.get<Card[]>('/api/cards', { params }).then((r) => ({ items: r.data ?? [], total: (r.data ?? []).length }));
+
+export const getCard = (uuid: string) =>
+  http.get<Card>(`/api/cards/${uuid}`).then((r) => r.data);
+
+export const createCard = (data: CreateCardRequest) =>
+  http.post<Card>('/api/cards', data).then((r) => r.data);
+
+export const updateCard = (uuid: string, data: Partial<Card>) =>
+  http.put<Card>(`/api/cards/${uuid}`, data).then((r) => r.data);
+
+export const deleteCard = (uuid: string) =>
+  http.delete(`/api/cards/${uuid}`).then((r) => r.data);
+
+// ---- 证书管理 ----
+export const getCerts = (cardUUID: string) =>
+  http.get<Certificate[]>(`/api/cards/${cardUUID}/certs`).then((r) => r.data ?? []);
+
+export const getCert = (cardUUID: string, certUUID: string) =>
+  http.get<Certificate>(`/api/cards/${cardUUID}/certs/${certUUID}`).then((r) => r.data);
+
+export const deleteCert = (cardUUID: string, certUUID: string) =>
+  http.delete(`/api/cards/${cardUUID}/certs/${certUUID}`).then((r) => r.data);
+
+export const generateKey = (cardUUID: string, data: KeyGenRequest) =>
+  http.post<Certificate>(`/api/cards/${cardUUID}/keygen`, data).then((r) => r.data);
+
+export const exportCert = (cardUUID: string, certUUID: string, format: string) =>
+  http.get(`/api/cards/${cardUUID}/certs/${certUUID}/export`, {
+    params: { format },
+    responseType: 'blob',
+  }).then((r) => r.data);
+
+// ---- 日志查询 ----
+export const getLogs = (params?: {
+  card_uuid?: string;
+  user_uuid?: string;
+  level?: string;
+  page?: number;
+  page_size?: number;
+}) => http.get<Log[]>('/api/logs', { params }).then((r) => ({ items: r.data ?? [], total: (r.data ?? []).length }));
+
+// ---- TOTP 管理（本地卡片内） ----
+export const getTOTPList = (cardUUID: string) =>
+  http.get<TOTPEntry[]>(`/api/cards/${cardUUID}/totp`).then((r) => r.data ?? []);
+
+export const getTOTPCode = (uuid: string) =>
+  http.get<TOTPCodeResponse>(`/api/totp/${uuid}/code`).then((r) => r.data);
+
+export const createTOTP = (data: CreateTOTPRequest) =>
+  http.post<TOTPEntry>(`/api/cards/${data.card_uuid}/totp`, data).then((r) => r.data);
+
+export const deleteTOTP = (uuid: string) =>
+  http.delete(`/api/totp/${uuid}`).then((r) => r.data);
+
+// ---- 本地 PKI - 自签名 ----
+export const generateSelfSigned = (data: SelfSignRequest) =>
+  http.post<Certificate>('/api/pki/selfsign', data).then((r) => r.data);
+
+// ---- 本地 PKI - CSR 管理 ----
+export const getCSRList = (params?: { page?: number; page_size?: number }) =>
+  http.get<{ items: CSRRecord[]; total: number }>('/api/pki/csr', { params })
+    .then((r) => ({ items: r.data?.items ?? [], total: r.data?.total ?? 0 }));
+
+export const createCSR = (data: CreateCSRRequest) =>
+  http.post<CSRRecord>('/api/pki/csr', data).then((r) => r.data);
+
+export const getCSR = (uuid: string) =>
+  http.get<CSRRecord>(`/api/pki/csr/${uuid}`).then((r) => r.data);
+
+export const deleteCSR = (uuid: string) =>
+  http.delete(`/api/pki/csr/${uuid}`).then((r) => r.data);
+
+export const downloadCSRFile = (uuid: string, filename: string) => {
+  return http.get(`/api/pki/csr/${uuid}/download`, { responseType: 'blob' })
+    .then((r) => {
+      const url = URL.createObjectURL(r.data);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    });
+};
+
+// ---- 本地 PKI - CA 管理 ----
+export const getLocalCAs = (params?: { page?: number; page_size?: number }) =>
+  http.get<{ items: LocalCA[]; total: number }>('/api/pki/ca', { params })
+    .then((r) => ({ items: r.data?.items ?? [], total: r.data?.total ?? 0 }));
+
+export const createLocalCA = (data: CreateCARequest) =>
+  http.post<LocalCA>('/api/pki/ca', data).then((r) => r.data);
+
+export const importLocalCA = (data: ImportCARequest) =>
+  http.post<LocalCA>('/api/pki/ca/import', data).then((r) => r.data);
+
+export const getLocalCA = (uuid: string) =>
+  http.get<LocalCA>(`/api/pki/ca/${uuid}`).then((r) => r.data);
+
+export const revokeLocalCA = (uuid: string) =>
+  http.post(`/api/pki/ca/${uuid}/revoke`).then((r) => r.data);
+
+export const deleteLocalCA = (uuid: string) =>
+  http.delete(`/api/pki/ca/${uuid}`).then((r) => r.data);
+
+export const exportLocalCA = (uuid: string, format: 'pem' | 'chain', name: string) => {
+  return http.get(`/api/pki/ca/${uuid}/export`, { params: { format }, responseType: 'blob' })
+    .then((r) => {
+      const url = URL.createObjectURL(r.data);
+      const a = document.createElement('a');
+      a.href = url; a.download = `${name}_${format}.pem`; a.click();
+      URL.revokeObjectURL(url);
+    });
+};
+
+// ---- 本地 PKI - 证书管理 ----
+export const getPKICerts = (params?: { page?: number; page_size?: number }) =>
+  http.get<{ items: PKICert[]; total: number }>('/api/pki/certs', { params })
+    .then((r) => ({ items: r.data?.items ?? [], total: r.data?.total ?? 0 }));
+
+export const issuePKICert = (data: IssueCertRequest) =>
+  http.post<PKICert>('/api/pki/certs/issue', data).then((r) => r.data);
+
+export const selfSignFromCSR = (csrUUID: string, validityDays: number, remark?: string) =>
+  http.post<PKICert>('/api/pki/certs/selfsign', { csr_uuid: csrUUID, validity_days: validityDays, remark }).then((r) => r.data);
+
+export const importPKICert = (data: ImportCertRequest) =>
+  http.post<{ cert: PKICert; key_matched: boolean }>('/api/pki/certs/import', data).then((r) => r.data);
+
+export const getPKICert = (uuid: string) =>
+  http.get<PKICert>(`/api/pki/certs/${uuid}`).then((r) => r.data);
+
+export const deletePKICert = (uuid: string) =>
+  http.delete(`/api/pki/certs/${uuid}`).then((r) => r.data);
+
+export const deletePKICertKey = (uuid: string) =>
+  http.delete(`/api/pki/certs/${uuid}/key`).then((r) => r.data);
+
+export const exportPKICert = (uuid: string, format: ExportCertFormat, password: string | undefined, filename: string) => {
+  return http.post(`/api/pki/certs/${uuid}/export`, { format, password }, { responseType: 'blob' })
+    .then((r) => {
+      const url = URL.createObjectURL(r.data);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    });
+};
+
+export const importPKICertToCard = (uuid: string, cardUUID: string) =>
+  http.post(`/api/pki/certs/${uuid}/import-to-card`, { card_uuid: cardUUID }).then((r) => r.data);
+
+export const revokePKICert = (uuid: string) =>
+  http.post(`/api/pki/certs/${uuid}/revoke`).then((r) => r.data);
+
+// ---- 旧版兼容 ----
+export const generateCSR = (data: CSRRequest) =>
+  http.post<CSRResponse>('/api/pki/csr', data).then((r) => r.data);
+
+export const importCert = (formData: FormData) =>
+  http.post('/api/pki/import', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  }).then((r) => r.data);

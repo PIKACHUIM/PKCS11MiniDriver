@@ -211,21 +211,21 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: webpage/package-lock.json
+          cache-dependency-path: front/package-lock.json
 
       - name: Install dependencies
-        working-directory: webpage
+        working-directory: front
         run: npm ci
 
       - name: Build
-        working-directory: webpage
+        working-directory: front
         run: npm run build
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
-          path: webpage/dist/
+          path: front/dist/
 
   # ================================================================
   # Job 7: 安全扫描（仅 push 到 master）

@@ -42,6 +42,7 @@ type Certificate struct {
 	Remark            string     `json:"remark"`
 	OrderNo           string     `json:"order_no,omitempty"`   // 关联订单号
 	CAUUID            string     `json:"ca_uuid,omitempty"`    // 签发 CA UUID
+	SerialNumber      string     `json:"serial_number,omitempty"` // X.509 序列号（十六进制）
 	IssuanceTmplUUID  string     `json:"issuance_tmpl_uuid,omitempty"` // 颁发模板 UUID
 	StoragePolicy     string     `json:"storage_policy,omitempty"`     // 存储策略（download/cloud/physical/virtual）
 	RevocationStatus  string     `json:"revocation_status"`   // active/revoked

@@ -166,6 +166,19 @@ func (s *Service) GetAccountByKeyID(ctx context.Context, keyID string) (*Account
 	return acct, err
 }
 
+// GetAccountByUUID 按 UUID 查询账户。
+func (s *Service) GetAccountByUUID(ctx context.Context, acctUUID string) (*Account, error) {
+	acct := &Account{}
+	err := s.db.QueryRowContext(ctx,
+		`SELECT uuid, config_id, key_id, public_key, contact, status, created_at
+		 FROM acme_accounts WHERE uuid = ?`, acctUUID,
+	).Scan(&acct.UUID, &acct.ConfigID, &acct.KeyID, &acct.PublicKey, &acct.Contact, &acct.Status, &acct.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("ACME 账户不存在: %s", acctUUID)
+	}
+	return acct, err
+}
+
 // ---- ACME 订单 ----
 
 // CreateOrder 创建 ACME 订单。

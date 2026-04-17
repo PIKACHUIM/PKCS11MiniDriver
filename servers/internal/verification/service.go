@@ -211,6 +211,22 @@ func (s *Service) DeleteExtensionInfo(ctx context.Context, infoUUID string) erro
 	return err
 }
 
+// GetExtensionInfo 按 UUID 查询扩展信息（公开方法）。
+func (s *Service) GetExtensionInfo(ctx context.Context, infoUUID string) (*storage.ExtensionInfo, error) {
+	return s.getExtensionInfo(ctx, infoUUID)
+}
+
+// MarkVerified 标记扩展信息验证通过（公开方法）。
+func (s *Service) MarkVerified(ctx context.Context, infoUUID string) error {
+	return s.markVerified(ctx, infoUUID)
+}
+
+// DeleteSubjectInfo 删除主体信息。
+func (s *Service) DeleteSubjectInfo(ctx context.Context, infoUUID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM subject_infos WHERE uuid = ?`, infoUUID)
+	return err
+}
+
 // ---- 内部方法 ----
 
 func (s *Service) getExtensionInfo(ctx context.Context, infoUUID string) (*storage.ExtensionInfo, error) {

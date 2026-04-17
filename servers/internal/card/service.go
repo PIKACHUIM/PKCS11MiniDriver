@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 
 	"github.com/globaltrusts/server-card/internal/storage"
@@ -221,7 +222,51 @@ func (s *Service) Decrypt(ctx context.Context, certUUID, cardUUID, userUUID, mec
 	}
 }
 
-// ---- 内部工具函数 ----
+// ExportAsPKCS12 将证书和私钥导出为 PEM 格式的组合数据。
+// 注意：当前版本不支持 PKCS12 打包，返回 PEM 格式的私钥+证书。
+// 如需 PKCS12 支持，请添加 software.sslmate.com/src/go-pkcs12 依赖。
+func (s *Service) ExportAsPKCS12(ctx context.Context, cert *storage.Certificate, password string) ([]byte, error) {
+	// 解密私钥
+	privDER, err := decryptWithMasterKey(s.masterKey, cert.PrivateData)
+	if err != nil {
+		return nil, fmt.Errorf("解密私钥失败: %w", err)
+	}
+
+	// 将私钥编码为 PEM
+	privPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privDER,
+	})
+
+	// 将证书编码为 PEM
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: cert.CertContent,
+	})
+
+	// 组合输出
+	result := append(privPEM, certPEM...)
+	return result, nil
+}
+
+// DecryptPrivateKey 解密证书的私钥（供外部使用）。
+func (s *Service) DecryptPrivateKey(ctx context.Context, cert *storage.Certificate) (crypto.PrivateKey, error) {
+	privDER, err := decryptWithMasterKey(s.masterKey, cert.PrivateData)
+	if err != nil {
+		return nil, fmt.Errorf("解密私钥失败: %w", err)
+	}
+	return parsePrivateKey(privDER)
+}
+
+// EncryptData 使用主密钥加密数据（供外部使用）。
+func (s *Service) EncryptData(data []byte) ([]byte, error) {
+	return encryptWithMasterKey(s.masterKey, data)
+}
+
+// DecryptData 使用主密钥解密数据（供外部使用）。
+func (s *Service) DecryptData(blob []byte) ([]byte, error) {
+	return decryptWithMasterKey(s.masterKey, blob)
+}
 
 // generateKeyPair 生成密钥对，返回私钥和公钥 DER。
 func generateKeyPair(keyType string) (crypto.PrivateKey, []byte, error) {

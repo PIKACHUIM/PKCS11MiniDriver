@@ -13,11 +13,16 @@ import (
 	"sync"
 )
 
+// SessionValidator 是 session token 验证函数类型。
+// 由 auth_handler.go 中的 getSession 提供，避免循环依赖。
+type SessionValidator func(token string) bool
+
 // AuthToken 管理本地 API 认证 Token。
 type AuthToken struct {
-	token    string
-	mu       sync.RWMutex
-	filePath string
+	token            string
+	mu               sync.RWMutex
+	filePath         string
+	sessionValidator SessionValidator // 可选：验证用户登录 session token
 }
 
 // NewAuthToken 创建并初始化本地认证 Token。
@@ -46,6 +51,14 @@ func NewAuthToken(dataDir string) (*AuthToken, error) {
 	return at, nil
 }
 
+// SetSessionValidator 注入 session token 验证函数。
+// 调用后，中间件会同时接受用户登录 session token 作为有效凭证。
+func (at *AuthToken) SetSessionValidator(v SessionValidator) {
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	at.sessionValidator = v
+}
+
 // Token 返回当前认证 Token。
 func (at *AuthToken) Token() string {
 	at.mu.RLock()
@@ -54,8 +67,9 @@ func (at *AuthToken) Token() string {
 }
 
 // Middleware 返回认证中间件。
-// 检查 Authorization: Bearer <token> 头，不匹配则返回 401。
-// 健康检查和静态资源路径跳过认证。
+// 检查 Authorization: Bearer <token> 头，支持：
+//  1. 本地 API Token（启动时生成）
+//  2. 用户登录 session token
 func (at *AuthToken) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 跳过不需要认证的路径
@@ -83,12 +97,24 @@ func (at *AuthToken) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if parts[1] != at.Token() {
-			writeUnauthorized(w, "Token 无效")
+		token := parts[1]
+
+		// 优先验证用户 session token
+		at.mu.RLock()
+		validator := at.sessionValidator
+		at.mu.RUnlock()
+		if validator != nil && validator(token) {
+			next.ServeHTTP(w, r)
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		// 回退：验证本地 API Token（供内嵌前端/调试使用）
+		if token == at.Token() {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		writeUnauthorized(w, "Token 无效")
 	})
 }
 

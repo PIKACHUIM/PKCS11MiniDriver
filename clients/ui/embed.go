@@ -1,8 +1,8 @@
 // Package ui 提供前端管理界面的静态文件服务。
 //
 // 构建流程：
-//  1. 构建前端：cd ../../webpage && npm run build
-//  2. 复制产物：cp -r ../../webpage/dist ./dist  (或使用 Makefile)
+//  1. 构建前端：cd ../../front && npm run build
+//  2. 复制产物：cp -r ../../front/dist ./dist  (或使用 Makefile)
 //  3. 构建后端：go build ./cmd/clients
 //
 // 开发模式：dist/index.html 为占位文件，前端通过 Vite 开发服务器(:5173)独立运行。

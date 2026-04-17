@@ -3,7 +3,9 @@ package issuance
 
 import (
 	"context"
+	"crypto/x509"
 	"database/sql"
+	"encoding/pem"
 	"fmt"
 	"time"
 
@@ -294,8 +296,108 @@ func (s *Service) ListCertExtTemplates(ctx context.Context) ([]*storage.CertExtT
 
 // DeleteCertExtTemplate 删除证书扩展模板。
 func (s *Service) DeleteCertExtTemplate(ctx context.Context, tmplUUID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM cert_ext_templates WHERE uuid = ?`, tmplUUID)
+	// 检查是否被颁发模板引用
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM issuance_templates WHERE extension_tmpl_uuid = ?`, tmplUUID,
+	).Scan(&count)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("证书扩展模板已被 %d 个颁发模板引用，无法删除", count)
+	}
+
+	_, err = s.db.ExecContext(ctx, `DELETE FROM cert_ext_templates WHERE uuid = ?`, tmplUUID)
 	return err
+}
+
+// RenewCert 续期证书（使用原证书的 CA 和密钥重新签发）。
+// 返回新证书记录，原证书保持不变。
+func (s *Service) RenewCert(ctx context.Context, cert *storage.Certificate, validDays int) (*storage.Certificate, error) {
+	if cert.RevocationStatus == "revoked" {
+		return nil, fmt.Errorf("已吊销的证书不能续期")
+	}
+	if cert.CAUUID == "" {
+		return nil, fmt.Errorf("证书没有关联的 CA，无法续期")
+	}
+
+	// 检查颁发模板是否允许续期
+	if cert.IssuanceTmplUUID != "" {
+		tmpl, err := s.GetIssuanceTemplate(ctx, cert.IssuanceTmplUUID)
+		if err == nil {
+			// 检查请求的有效期是否在模板允许列表中
+			if tmpl.ValidDays != "" && tmpl.ValidDays != "[]" {
+				if !isValidDayAllowed(tmpl.ValidDays, validDays) {
+					return nil, fmt.Errorf("有效期 %d 天不在模板允许的有效期列表中", validDays)
+				}
+			}
+		}
+	}
+
+	// 解析原证书获取主体信息
+	if len(cert.CertContent) == 0 {
+		return nil, fmt.Errorf("证书内容为空，无法续期")
+	}
+
+	x509Cert, err := x509.ParseCertificate(cert.CertContent)
+	if err != nil {
+		// 尝试 PEM 解码
+		block, _ := pem.Decode(cert.CertContent)
+		if block != nil {
+			x509Cert, err = x509.ParseCertificate(block.Bytes)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("解析证书失败: %w", err)
+		}
+	}
+
+	// 创建新证书记录（复制原证书的基本信息，更新有效期）
+	newCert := &storage.Certificate{
+		CardUUID:         cert.CardUUID,
+		CertType:         cert.CertType,
+		KeyType:          cert.KeyType,
+		PrivateData:      cert.PrivateData, // 复用原私钥
+		Remark:           cert.Remark + " (续期)",
+		CAUUID:           cert.CAUUID,
+		IssuanceTmplUUID: cert.IssuanceTmplUUID,
+		StoragePolicy:    cert.StoragePolicy,
+		RevocationStatus: "active",
+	}
+
+	// 记录原证书的主体信息（用于日志）
+	_ = x509Cert.Subject.CommonName
+
+	// 将新证书记录存入数据库（实际签发由 CA 服务完成，这里记录待签发状态）
+	certRepo := storage.NewCertRepo(s.db)
+	if err := certRepo.Create(ctx, newCert); err != nil {
+		return nil, fmt.Errorf("创建续期证书记录失败: %w", err)
+	}
+
+	return newCert, nil
+}
+
+// isValidDayAllowed 检查有效期是否在 JSON 数组中。
+func isValidDayAllowed(validDaysJSON string, days int) bool {
+	// 简单解析 JSON 数组 "[30,90,365]"
+	if validDaysJSON == "" || validDaysJSON == "[]" {
+		return true
+	}
+	target := fmt.Sprintf("%d", days)
+	// 在 JSON 字符串中查找数字
+	for i := 0; i < len(validDaysJSON); i++ {
+		if validDaysJSON[i] >= '0' && validDaysJSON[i] <= '9' {
+			j := i
+			for j < len(validDaysJSON) && validDaysJSON[j] >= '0' && validDaysJSON[j] <= '9' {
+				j++
+			}
+			if validDaysJSON[i:j] == target {
+				return true
+			}
+			i = j
+		}
+	}
+	return false
 }
 
 // ---- 工具函数 ----

@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/globaltrusts/server-card/internal/template"
 	"github.com/globaltrusts/server-card/internal/verification"
 	"github.com/globaltrusts/server-card/internal/workflow"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func main() {
@@ -58,6 +60,11 @@ func main() {
 	cardRepo := storage.NewCardRepo(db)
 	certRepo := storage.NewCertRepo(db)
 	logRepo := storage.NewLogRepo(db)
+
+	// 首次启动时创建默认管理员账号
+	if err := ensureDefaultAdmin(context.Background(), userRepo); err != nil {
+		slog.Warn("初始化默认管理员账号失败", "error", err)
+	}
 
 	jwtMgr, err := auth.NewManager(cfg.JWT.Secret, cfg.JWT.ExpiryHours)
 	if err != nil {
@@ -146,17 +153,47 @@ func main() {
 }
 
 // loadOrGenerateMasterKey 加载或生成服务端主密钥。
-// 主密钥持久化到文件（生产环境应使用 HSM 或密钥管理服务）。
+// 优先级：1. 环境变量 SERVER_CARD_MASTER_KEY（Base64）
+//         2. 配置文件路径（验证文件权限为 0600）
+//         3. 自动生成并保存到文件
 func loadOrGenerateMasterKey(cfg *configs.Config) ([]byte, error) {
-	keyPath := cfg.Database.Path + ".masterkey"
+	// 1. 优先从环境变量读取（Base64 编码的 32 字节密钥）
+	if envKey := os.Getenv("SERVER_CARD_MASTER_KEY"); envKey != "" {
+		key, err := base64.StdEncoding.DecodeString(envKey)
+		if err != nil {
+			return nil, fmt.Errorf("解码环境变量 SERVER_CARD_MASTER_KEY 失败: %w", err)
+		}
+		if len(key) != 32 {
+			return nil, fmt.Errorf("环境变量 SERVER_CARD_MASTER_KEY 长度必须为 32 字节（Base64 编码后 44 字符）")
+		}
+		slog.Info("已从环境变量加载服务端主密钥")
+		return key, nil
+	}
 
-	// 尝试读取已有密钥
-	if data, err := os.ReadFile(keyPath); err == nil && len(data) == 32 {
-		slog.Info("已加载服务端主密钥")
+	// 2. 从配置文件路径读取
+	keyPath := cfg.MasterKeyFile
+	if keyPath == "" {
+		keyPath = cfg.Database.Path + ".masterkey"
+	}
+
+	if data, err := os.ReadFile(keyPath); err == nil {
+		if len(data) != 32 {
+			return nil, fmt.Errorf("主密钥文件长度错误，期望 32 字节，实际 %d 字节", len(data))
+		}
+		// 验证文件权限为 0600
+		info, err := os.Stat(keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("获取主密钥文件信息失败: %w", err)
+		}
+		if info.Mode().Perm() != 0600 {
+			slog.Warn("主密钥文件权限不安全，建议设置为 0600", "path", keyPath, "perm", info.Mode().Perm())
+		}
+		slog.Info("已从文件加载服务端主密钥", "path", keyPath)
 		return data, nil
 	}
 
-	// 生成新密钥
+	// 3. 生成新密钥
+	slog.Warn("未找到主密钥，正在生成新密钥。生产环境请使用环境变量 SERVER_CARD_MASTER_KEY")
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("生成主密钥失败: %w", err)
@@ -166,7 +203,8 @@ func loadOrGenerateMasterKey(cfg *configs.Config) ([]byte, error) {
 		return nil, fmt.Errorf("保存主密钥失败: %w", err)
 	}
 
-	slog.Info("已生成新的服务端主密钥", "path", keyPath)
+	slog.Info("已生成新的服务端主密钥", "path", keyPath,
+		"tip", "生产环境请将密钥内容设置到环境变量 SERVER_CARD_MASTER_KEY（base64 编码）")
 	return key, nil
 }
 
@@ -186,4 +224,44 @@ func initLogger(level string) {
 
 	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
 	slog.SetDefault(slog.New(handler))
+}
+
+// ensureDefaultAdmin 首次启动时创建默认管理员账号。
+// 默认账号：admin / admin
+// 如果 admin 用户已存在则跳过。
+func ensureDefaultAdmin(ctx context.Context, userRepo *storage.UserRepo) error {
+	const defaultUsername = "admin"
+	const defaultPassword = "admin"
+
+	// 检查 admin 是否已存在
+	if _, err := userRepo.GetByUsername(ctx, defaultUsername); err == nil {
+		// 已存在，跳过
+		return nil
+	}
+
+	// 生成密码哈希
+	hash, err := bcrypt.GenerateFromPassword([]byte(defaultPassword), 13)
+	if err != nil {
+		return fmt.Errorf("生成密码哈希失败: %w", err)
+	}
+
+	admin := &storage.User{
+		Username:     defaultUsername,
+		DisplayName:  "系统管理员",
+		Email:        "admin@opencert.local",
+		PasswordHash: string(hash),
+		Role:         "admin",
+		Enabled:      true,
+	}
+
+	if err := userRepo.Create(ctx, admin); err != nil {
+		return fmt.Errorf("创建默认管理员失败: %w", err)
+	}
+
+	slog.Info("已创建默认管理员账号",
+		"username", defaultUsername,
+		"password", defaultPassword,
+		"tip", "请登录后立即修改密码",
+	)
+	return nil
 }
